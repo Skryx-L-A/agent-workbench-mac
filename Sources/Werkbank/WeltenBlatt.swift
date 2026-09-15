@@ -1169,8 +1169,8 @@ struct WeltenAgentZeile: View {
                     }
                 }
                 HStack(spacing: 4) {
-                    Zustandspunkt(art: WeltenWorte.punkt(zustand: agent.zustand), basis: 7)
-                    Text(WeltenWorte.zustand(agent.zustand))
+                    Zustandspunkt(art: WeltenWorte.punkt(agent: agent), basis: 7)
+                    WeltenLebenWort(agent: agent)
                     if !agent.spezialgebiet.isEmpty {
                         Text("· \(agent.spezialgebiet)").foregroundStyle(.secondary).lineLimit(1)
                     }
@@ -1181,9 +1181,9 @@ struct WeltenAgentZeile: View {
             WeltenZahl(n: ungelesen)
         }
         .padding(.vertical, 2)
-        .help(agent.zustandText)
+        .help(WeltenWorte.leben(agent) ?? agent.zustandText)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(agent.name), \(WeltenWorte.stufe(agent.stufe)), \(agent.zustandText), \(agent.spezialgebiet)\(ungelesen > 0 ? ", \(ungelesen) ungelesen" : "")")
+        .accessibilityLabel("\(agent.name), \(WeltenWorte.stufe(agent.stufe)), \(WeltenWorte.leben(agent) ?? agent.zustandText), \(agent.spezialgebiet)\(ungelesen > 0 ? ", \(ungelesen) ungelesen" : "")")
     }
 }
 
@@ -1202,13 +1202,55 @@ struct WeltenZahl: View {
     }
 }
 
-/// Die Figur eines Agenten aus Agentenfigur.swift -- Art und Team aus dem Profil, Zustand vom Kern.
+/// Die Figur eines Agenten aus Agentenfigur.swift -- Art und Team aus dem Profil, Zustand vom Kern,
+/// darum der Ring des Lebenszeichens (Auftrag agentaktiv), wo die Welt einen Traeger hat.
 struct WeltenFigur: View {
     let agent: WeltAgent
     var groesse: CGFloat = 32
     var body: some View {
         Agentenfigur(rolle: agent.figurRolle.isEmpty ? agent.id : agent.figurRolle, stufe: agent.stufe, name: agent.id,
                      team: agent.figurTeam, zustand: agent.figur, groesse: groesse, arten: agent.arten)
+            .overlay { FigurRingAnsicht(ring: agent.ring, groesse: groesse) }
+    }
+}
+
+/// Das Wort des Lebenszeichens neben dem Punkt. Solange ein Zug laeuft oder eine Nachricht auf den Stand
+/// „nicht gestartet" zulaeuft, stellt eine Uhr es jede Sekunde neu; sonst steht es still.
+struct WeltenLebenWort: View {
+    let agent: WeltAgent
+    /// Ohne Lebenszeichen: statt des Zustandsworts der Zustandstext des Kerns („arbeitet an …").
+    var ohneLeben: String? = nil
+
+    var body: some View {
+        if agent.leben?.stand == "arbeitet" {
+            TimelineView(.periodic(from: .now, by: 1)) { tl in Text(WeltenWorte.agentWort(agent, jetzt: tl.date)) }
+        } else if WeltenWorte.leben(agent) == nil, let ohneLeben {
+            Text(ohneLeben)
+        } else {
+            Text(WeltenWorte.agentWort(agent))
+        }
+    }
+}
+
+/// Der Stand direkt unter der eigenen Nachricht (Auftrag agentaktiv): zugestellt, arbeitet, nicht gestartet.
+struct WeltenAntwortStandZeile: View {
+    let agent: WeltAgent
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { tl in
+            if let st = WeltenWorte.antwort(agent, jetzt: tl.date) {
+                HStack(spacing: 5) {
+                    Spacer(minLength: 60)
+                    Zustandspunkt(art: st.art == "arbeitet" ? .laeuft : st.art == "zugestellt" ? .ruhig : .will, basis: 6)
+                    Text(st.text)
+                        .font(.caption)
+                        .foregroundStyle(st.art == "zugestellt" || st.art == "arbeitet" ? AnyShapeStyle(.secondary) : AnyShapeStyle(Color.orange))
+                }
+                .padding(.top, -6)
+                .accessibilityElement(children: .combine)
+                .accessibilityIdentifier("welten-antwortstand")
+            }
+        }
     }
 }
 
@@ -1278,8 +1320,11 @@ struct WeltenMitte: View {
                         Text("·")
                         Text(WeltenWorte.maschine(a.maschine))
                         Text("·")
-                        Zustandspunkt(art: WeltenWorte.punkt(zustand: a.zustand), basis: 7)
-                        Text(a.zustandText).lineLimit(1)
+                        Zustandspunkt(art: WeltenWorte.punkt(agent: a), basis: 7)
+                        WeltenLebenWort(agent: a, ohneLeben: a.zustandText).lineLimit(1)
+                        if WeltenWorte.leben(a) != nil, a.zustand == "arbeitet", a.zustandText != "arbeitet" {
+                            Text("· \(a.zustandText)").lineLimit(1)
+                        }
                     }
                     .font(.callout).foregroundStyle(.secondary)
                 }
@@ -1376,7 +1421,10 @@ struct WeltenMitte: View {
                     }
                     ForEach(eintraege, id: \.id) { e in
                         switch e {
-                        case .nachricht(let n): WeltenNachrichtKarte(nachricht: n, welt: welt, imKanal: agent == nil, zustand: zustand)
+                        case .nachricht(let n):
+                            WeltenNachrichtKarte(nachricht: n, welt: welt, imKanal: agent == nil, zustand: zustand)
+                            // Auftrag agentaktiv: unter der eigenen, noch unbeantworteten Nachricht, bis die Antwort da ist.
+                            if let a = agent, direktchat == nil, a.antwort?.nachricht == n.id { WeltenAntwortStandZeile(agent: a) }
                         case .frage(let f): WeltenFrageKarte(frage: f, welt: welt, zustand: zustand)
                         }
                     }
@@ -1976,9 +2024,10 @@ struct WeltenInspektor: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text(a.name).font(.title3.weight(.semibold))
                 Text(WeltenWorte.stufe(a.stufe) + (a.team.map { " · Team \(WeltenWorte.team($0))" } ?? "")).foregroundStyle(.secondary)
-                HStack(spacing: 4) { Zustandspunkt(art: WeltenWorte.punkt(zustand: a.zustand), basis: 7); Text(WeltenWorte.zustand(a.zustand)) }.font(.callout)
+                HStack(spacing: 4) { Zustandspunkt(art: WeltenWorte.punkt(agent: a), basis: 7); WeltenLebenWort(agent: a) }.font(.callout)
             }
         }
+        if a.leben != nil { lebenszeichen(a) }
         gruppe("Betrieb") {
             HStack {
                 Text("Schalter").font(.callout)
@@ -2014,6 +2063,25 @@ struct WeltenInspektor: View {
                 feld("Kennung", a.id, mono: true)
             }
         }
+    }
+
+    /// Auftrag agentaktiv: was der Traeger ueber den Zug sagt -- jetzt, Art, Grund, naechster Wecker, letzter Zug.
+    private func lebenszeichen(_ a: WeltAgent) -> some View {
+        gruppe("Zug") {
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Jetzt").font(.caption).foregroundStyle(.secondary)
+                WeltenLebenWort(agent: a, ohneLeben: a.leben?.stand == "schlaeft" ? "schläft" : nil).font(.callout)
+            }
+            if let z = a.zug, z.laeuft, let art = z.art { feld("Art", WeltenWorte.zugArt(art)) }
+            if let g = a.leben?.grund { feld("Grund", WeltenWorte.grund(g)) }
+            if let w = a.leben?.wecker { feld("Nächster Wecker", AgentsWorte.uhrzeit(w)) }
+            if let z = a.zug, let e = z.letzterErgebnis { feld("Letzter Zug", "\(AgentsWorte.uhrzeit(z.letzterEnde)), \(e)") }
+            if !welt.traegerZugFehler.isEmpty {
+                Text("Lebenszeichen nicht lesbar: \(welt.traegerZugFehler)").font(.caption).foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .accessibilityIdentifier("welten-lebenszeichen")
     }
 
     /// Das Profil bearbeiten: Modell, Denkstufe, Fallback, Maschine, Spezialgebiet (Plan Abschnitt 6, Inspektor).
@@ -2187,6 +2255,12 @@ struct WeltenInspektor: View {
                 feld("Fragen", "\(welt.offeneFragen.count) offen von \(welt.fragen.count)")
             }
             if !welt.maschine.isEmpty { maschine }
+            if !welt.zugaenge.isEmpty {
+                gruppe("Zugänge") {
+                    Text("\(welt.zugaenge.joined(separator: ", ")) – eingerichtet vom Menschen, gilt für alle Agenten der Welt")
+                        .font(.callout).fixedSize(horizontal: false, vertical: true)
+                }
+            }
             gruppe("Sofortstopp") {
                 Text("Sperrt neue Starts und beendet laufende Züge der ganzen Welt. Tickets in Arbeit werden unterbrochen, nie als Erfolg gezählt.")
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
@@ -2219,6 +2293,13 @@ struct WeltenInspektor: View {
 // MARK: Die Auskunft fuer `awbmac-ctl welten`
 
 extension WeltenZustand {
+    /// Auftrag agentaktiv: der Zug eines Agenten fuer die Auskunft; ohne Traeger `null`.
+    nonisolated static func zugAuskunft(_ a: WeltAgent) -> Any {
+        guard let z = a.zug else { return a.leben.map { ["leben": $0.stand] as [String: Any] } ?? NSNull() }
+        return ["laeuft": z.laeuft, "seit": z.seit ?? "", "art": z.art ?? "", "zustellung_offen": z.zustellungOffen, "grund": z.grund ?? "",
+                "naechster_wecker": z.naechsterWecker ?? "", "letzter": z.letzterErgebnis ?? "", "leben": a.leben?.stand ?? ""] as [String: Any]
+    }
+
     func auskunft(kern: KernVerbindung, sichtbar: Bool) -> [String: Any] {
         var raus: [String: Any] = ["sichtbar": sichtbar, "darstellung": darstellung.rawValue, "reiter": reiter.rawValue,
                                    "blatt": blatt.rawValue, "auswahl": auswahl, "gespraech": gespraech,
@@ -2266,11 +2347,14 @@ extension WeltenZustand {
                 let a = w.agent(id)
                 return ["art": "agent", "id": z.id, "name": a?.name ?? id, "ebene": ebene, "stufe": a?.stufe ?? "", "team": teamZusatz ? (a?.team ?? "") : "",
                         "zustand": WeltenWorte.zustand(a?.zustand ?? ""), "text": a?.zustandText ?? "", "ungelesen": ungelesen(w, agent: id),
-                        "figur": a.map { FigurArt.fuer(rolle: $0.figurRolle, team: $0.figurTeam, arten: $0.arten).rawValue } ?? ""]
+                        "figur": a.map { FigurArt.fuer(rolle: $0.figurRolle, team: $0.figurTeam, arten: $0.arten).rawValue } ?? "",
+                        "figurZustand": a?.figur.rawValue ?? "", "wort": a.map { WeltenWorte.agentWort($0) } ?? "", "ring": a?.ring.rawValue ?? "",
+                        "zug": a.map { Self.zugAuskunft($0) } ?? NSNull()]
             }
         }
         let a = w.agent(agentId)
-        raus["kopf"] = a.map { ["name": $0.name, "stufe": WeltenWorte.stufe($0.stufe), "modell": $0.modell, "maschine": $0.maschine, "zug": $0.zustandText] as [String: Any] }
+        raus["kopf"] = a.map { ["name": $0.name, "stufe": WeltenWorte.stufe($0.stufe), "modell": $0.modell, "maschine": $0.maschine, "zug": $0.zustandText,
+                                "leben": WeltenWorte.leben($0) ?? "", "ring": $0.ring.rawValue] as [String: Any] }
             ?? (auswahl == Self.uebersicht ? ["name": "Übersicht", "welt": w.name] : ["name": "Kanal", "nachrichten": w.kanalGesamt]) as [String: Any]
         raus["gespraeche"] = a.map { agent in [Self.einzel] + agent.direktchats } ?? []
         let k = gespraechSchluessel()
@@ -2284,6 +2368,11 @@ extension WeltenZustand {
             for m in nachrichten(w, schluessel: k) { chat.append(["art": "nachricht", "id": m.id, "von": m.von, "an": m.an, "text": m.text, "markierung": m.markierung ?? "", "offen": m.offenFuerMensch]) }
         }
         raus["chat"] = chat
+        // Auftrag agentaktiv: der Stand unter der eigenen Nachricht, wie ihn die Mitte gerade zeichnet.
+        raus["antwortStand"] = k.hasPrefix("einzel:") ? (a.flatMap { agent in
+            WeltenWorte.antwort(agent).map { ["text": $0.text, "art": $0.art, "nachricht": agent.antwort?.nachricht ?? "", "wecken": agent.antwort?.wecken ?? ""] as [String: Any] }
+        } ?? [:]) : [:]
+        raus["traegerZugFehler"] = w.traegerZugFehler
         raus["eingabe"] = k.hasPrefix("direkt:") ? ["lesend": true] as [String: Any] : ["lesend": false, "adressen": a == nil ? adressen(w) : "", "entwurf": entwuerfe[k] ?? ""] as [String: Any]
         raus["offeneFragen"] = w.offeneFragen.map(\.id)
         raus["ungelesenWelt"] = w.ungelesen
@@ -2302,7 +2391,10 @@ extension WeltenZustand {
         raus["tickets"] = tickets(w).map { ["id": $0.id, "titel": $0.titel, "stand": $0.stand, "adressaten": $0.adressaten] as [String: Any] }
         raus["inspektorInhalt"] = a.map { agent -> [String: Any] in
             switch blatt {
-            case .profil: return ["modell": agent.modell, "denkstufe": agent.denkstufe, "fallback": agent.fallback, "maschine": agent.maschine, "spezialgebiet": agent.spezialgebiet, "stand": agent.stand, "postfachOffen": agent.postfachOffen]
+            case .profil: return ["modell": agent.modell, "denkstufe": agent.denkstufe, "fallback": agent.fallback, "maschine": agent.maschine, "spezialgebiet": agent.spezialgebiet, "stand": agent.stand, "postfachOffen": agent.postfachOffen,
+                                  "lebenszeichen": agent.leben.map { l in ["jetzt": WeltenWorte.leben(agent) ?? (l.stand == "schlaeft" ? "schläft" : WeltenWorte.zustand(agent.zustand)),
+                                                                          "art": agent.zug?.laeuft == true ? WeltenWorte.zugArt(agent.zug?.art) : "", "grund": WeltenWorte.grund(l.grund),
+                                                                          "wecker": l.wecker ?? "", "ring": agent.ring.rawValue] as [String: Any] } ?? [:]]
             case .protokoll: return ["eintraege": w.tickets.flatMap { $0.verlauf.filter { $0.von == agent.id } }.count + agent.verlauf.count,
                                      "profil": agent.verlauf.map { ["ereignis": $0.ereignis, "notiz": $0.notiz, "aenderungen": $0.aenderungen] }]
             case .gedaechtnis: return ["text": String(agent.gedaechtnis.prefix(200))]

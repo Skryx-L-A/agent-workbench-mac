@@ -762,6 +762,64 @@ struct FigurZeichner {
     }
 }
 
+// MARK: Der Ring des Lebenszeichens
+
+/// DER RING UM DIE FIGUR (Auftrag agentaktiv, 15.09.2026). der Nutzer nach dem ersten echten Chat:
+/// „nachdem ich die Nachricht gesendet habe, wusste ich nicht, ob Myproject reagieren wird. Das muss man
+/// am Avatar sehen können." Die Figur selbst bleibt unveraendert (ihre Neugestaltung ist gesperrt); das
+/// Lebenszeichen legt sich als Ring darum:
+///   arbeitet  ein Bogen in der Lauf-Farbe kreist ruhig ueber einem blassen Ring, solange ein Zug laeuft.
+///   wartet    ein gepunkteter Ring, still: die Nachricht ist zugestellt, der Traeger hat noch keinen Zug.
+/// Bei „Bewegung reduzieren" (System) oder `figurStandbild` steht statt des Bogens ein voller Ring. Der
+/// Ring liegt ausserhalb des Rahmens der Figur und veraendert kein Layout; er ist Schmuck neben dem Wort
+/// und fuer VoiceOver still wie die Figur.
+enum FigurRing: String, Sendable {
+    case keiner, arbeitet, wartet
+}
+
+struct FigurRingAnsicht: View {
+    let ring: FigurRing
+    let groesse: CGFloat
+
+    @Environment(\.accessibilityReduceMotion) private var systemRuhig
+    @Environment(\.figurStandbild) private var standbild
+
+    /// Ein Umlauf des Bogens in Sekunden: ruhig genug fuer den Blick zur Seite, schnell genug, um Bewegung zu sehen.
+    static let umlauf: TimeInterval = 1.8
+
+    var body: some View {
+        let breite = max(1.5, groesse * 0.05)
+        let abstand = breite + 1
+        let farbe = Color(nsColor: FigurZustand.arbeitet.farbe)
+        Group {
+            switch ring {
+            case .keiner:
+                EmptyView()
+            case .wartet:
+                Circle()
+                    .strokeBorder(Color(nsColor: .secondaryLabelColor), style: StrokeStyle(lineWidth: breite, lineCap: .round, dash: [0.01, breite * 2.4]))
+            case .arbeitet:
+                if systemRuhig || standbild {
+                    Circle().strokeBorder(farbe, lineWidth: breite)
+                } else {
+                    TimelineView(.animation(minimumInterval: 1.0 / 30)) { tl in
+                        let winkel = tl.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: Self.umlauf) / Self.umlauf * 360
+                        ZStack {
+                            Circle().strokeBorder(farbe.opacity(0.28), lineWidth: breite)
+                            Circle().inset(by: breite / 2).trim(from: 0, to: 0.3)
+                                .stroke(farbe, style: StrokeStyle(lineWidth: breite, lineCap: .round))
+                                .rotationEffect(.degrees(winkel))
+                        }
+                    }
+                }
+            }
+        }
+        .padding(-abstand)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+}
+
 // MARK: Die Ansicht
 
 private struct FigurStandbildSchluessel: EnvironmentKey { static let defaultValue = false }

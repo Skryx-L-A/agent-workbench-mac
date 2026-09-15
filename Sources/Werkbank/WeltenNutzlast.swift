@@ -142,6 +142,46 @@ struct WeltFrage: Equatable, Identifiable, Sendable {
     }
 }
 
+/// DAS LEBENSZEICHEN (Auftrag agentaktiv, 15.09.2026): je Agent, was der Traeger ueber seinen Zug sagt
+/// (`agents_traeger.py status --nur-zug`, ueber welten.ts). Ohne Traeger fehlt alles davon.
+struct WeltZug: Equatable, Sendable {
+    let laeuft, zustellungOffen: Bool
+    let seit, art, wartetSeit, grund, naechsterWecker: String?
+    /// Der letzte beendete Zug: Ende, Urteil, Art.
+    let letzterEnde, letzterErgebnis: String?
+
+    init?(_ j: [String: Any]?) {
+        guard let j, let l = j["laeuft"] as? Bool else { return nil }
+        laeuft = l; zustellungOffen = j["zustellung_offen"] as? Bool ?? false
+        seit = optText(j, "seit"); art = optText(j, "art"); wartetSeit = optText(j, "wartet_seit"); grund = optText(j, "grund")
+        naechsterWecker = optText(j, "naechster_wecker")
+        let letzter = j["letzter"] as? [String: Any]
+        letzterEnde = letzter.flatMap { optText($0, "ende") }; letzterErgebnis = letzter.flatMap { optText($0, "ergebnis") }
+    }
+}
+
+/// `arbeitet` (ein Zug laeuft), `wartet` (eine Zustellung ohne Zug), `schlaeft`, `nicht_erreichbar`.
+struct WeltLeben: Equatable, Sendable {
+    let stand: String
+    let seit, grund, wecker: String?
+
+    init?(_ j: [String: Any]?) {
+        guard let j, let st = j["stand"] as? String, !st.isEmpty else { return nil }
+        stand = st; seit = optText(j, "seit"); grund = optText(j, "grund"); wecker = optText(j, "wecker")
+    }
+}
+
+/// Der Stand unter der eigenen, noch unbeantworteten Nachricht im Einzelchat.
+struct WeltAntwortStand: Equatable, Sendable {
+    let nachricht, zeit, stand, wecken: String
+    let grund: String?
+
+    init?(_ j: [String: Any]?) {
+        guard let j, let n = j["nachricht"] as? String, !n.isEmpty else { return nil }
+        nachricht = n; zeit = text(j, "zeit"); stand = text(j, "stand"); wecken = text(j, "wecken"); grund = optText(j, "grund")
+    }
+}
+
 struct WeltAgent: Equatable, Identifiable, Sendable {
     let id, name, stufe, spezialgebiet, modell, fallback, maschine, stand, standSeit, angelegt: String
     let team, standGrund, ticket: String?
@@ -162,6 +202,10 @@ struct WeltAgent: Equatable, Identifiable, Sendable {
     let vorlage, angelegtVon: String?
     /// Auftrag Nr. 4: der Skill-Reiter.
     let skillAnsicht: WeltSkills
+    /// Auftrag agentaktiv: Zug, Lebenszeichen und der Stand unter der eigenen Nachricht; nil ohne Traeger.
+    let zug: WeltZug?
+    let leben: WeltLeben?
+    let antwort: WeltAntwortStand?
 
     init(_ j: [String: Any]) {
         id = text(j, "id"); name = text(j, "name"); stufe = text(j, "stufe"); spezialgebiet = text(j, "spezialgebiet")
@@ -181,9 +225,13 @@ struct WeltAgent: Equatable, Identifiable, Sendable {
         bash = texte(j, "bash"); kontextgrenze = text(j, "kontextgrenze"); figurFarbe = text(f, "farbe")
         vorlage = optText(j, "vorlage"); angelegtVon = optText(j, "angelegt_von")
         skillAnsicht = WeltSkills(objekt(j, "skill_ansicht"))
+        zug = WeltZug(j["zug"] as? [String: Any]); leben = WeltLeben(j["leben"] as? [String: Any])
+        antwort = WeltAntwortStand(j["antwort"] as? [String: Any])
     }
 
     var istHauptagent: Bool { stufe == "hauptagent" }
+    /// Der Ring um die Figur (Agentenfigur.swift, `FigurRing`).
+    var ring: FigurRing { leben?.stand == "arbeitet" ? .arbeitet : leben?.stand == "wartet" ? .wartet : .keiner }
     var figur: FigurZustand { FigurZustand(vertrag: figurZustand) }
     /// Die Art je Team fuer `Agentenfigur`: das Profil entscheidet, nicht die Vorgabe des Teams.
     var arten: [String: String] { [figurTeam: figurArt == "tier" ? "tier" : "roboter"] }
@@ -404,6 +452,10 @@ struct Welt: Equatable, Identifiable, Sendable {
     let traegerEingerichtet: Bool
     let traegerLaeuft: Bool?
     let traegerMoeglich: Bool
+    /// Zugaenge nach draussen (`zugaenge.json`), nur Name und Art, etwa `myproject-server (ssh)`.
+    let zugaenge: [String]
+    /// Auftrag agentaktiv: warum das Lebenszeichen nicht lesbar war; leer, wenn es lesbar war oder kein Traeger da ist.
+    let traegerZugFehler: String
 
     static func == (a: Welt, b: Welt) -> Bool {
         a.pfad == b.pfad && a.name == b.name && a.stand == b.stand && a.gelesen == b.gelesen && a.agenten == b.agenten
@@ -414,6 +466,8 @@ struct Welt: Equatable, Identifiable, Sendable {
             && a.antraege == b.antraege && a.skillsFehler == b.skillsFehler && a.skillVerlauf.count == b.skillVerlauf.count
             && a.maschine == b.maschine && a.fern == b.fern && a.verbindungOk == b.verbindungOk && a.verbindungSeit == b.verbindungSeit
             && a.traegerEingerichtet == b.traegerEingerichtet && a.traegerLaeuft == b.traegerLaeuft && a.traegerMoeglich == b.traegerMoeglich
+            && a.zugaenge == b.zugaenge
+            && a.traegerZugFehler == b.traegerZugFehler
     }
 
     init(_ j: [String: Any]) {
@@ -450,6 +504,8 @@ struct Welt: Equatable, Identifiable, Sendable {
         let t = objekt(j, "traeger")
         traegerEingerichtet = t["eingerichtet"] as? Bool ?? false; traegerLaeuft = t["laeuft"] as? Bool
         traegerMoeglich = t["moeglich"] as? Bool ?? false
+        zugaenge = Werkbank.liste(j, "zugaenge").compactMap { z in text(z, "name").isEmpty ? nil : "\(text(z, "name")) (\(text(z, "art").isEmpty ? "ssh" : text(z, "art")))" }
+        traegerZugFehler = text(t, "zug_fehler")
     }
 
     func agent(_ id: String?) -> WeltAgent? { id.flatMap { i in agenten.first { $0.id == i } } }
@@ -587,6 +643,93 @@ enum WeltenWorte {
             let name = maschine(m.name)
             guard erreichbar else { return (.will, "\(name) nicht erreichbar\(m.seit.map { " seit \(AgentsWorte.uhrzeit($0))" } ?? "")") }
             return (.laeuft, "\(name) erreichbar, \(m.traegerEingerichtet == 1 ? "1 Träger" : "\(m.traegerEingerichtet) Träger")")
+        }
+    }
+
+    // --- Das Lebenszeichen (Auftrag agentaktiv) ------------------------------------------
+
+    /// Nach so vielen Sekunden ohne Zugbeginn heisst eine zugestellte Nachricht „nicht gestartet".
+    static let nichtGestartetNach: TimeInterval = 30
+
+    /// m:ss, ab einer Stunde h:mm:ss, seit einer ISO-Zeit.
+    static func dauer(seit iso: String?, jetzt: Date = Date()) -> String {
+        guard let iso, let d = datum(iso) else { return "" }
+        let s = max(0, Int(jetzt.timeIntervalSince(d)))
+        let h = s / 3600, m = (s % 3600) / 60, sek = s % 60
+        return h > 0 ? String(format: "%d:%02d:%02d", h, m, sek) : String(format: "%d:%02d", m, sek)
+    }
+
+    /// Das Wort neben dem Avatar, wenn der Traeger etwas zu sagen hat; nil heisst: es gilt das Zustandswort.
+    /// Dieselbe Regel wie `lebenWort` in welten-view.ts.
+    static func leben(_ a: WeltAgent, jetzt: Date = Date()) -> String? {
+        guard let l = a.leben else { return nil }
+        if l.stand == "arbeitet" { return l.seit.map { "arbeitet seit \(dauer(seit: $0, jetzt: jetzt))" } ?? "arbeitet" }
+        if ["braucht_dich", "pausiert", "gestoppt", "archiviert"].contains(a.zustand) { return nil }
+        switch l.stand {
+        case "wartet": return "wartet auf den Träger"
+        case "nicht_erreichbar": return "Träger nicht erreichbar"
+        default: return nil
+        }
+    }
+
+    /// Der Punkt zum Wort: steht das Lebenszeichen da, zeigt auch der Punkt es (arbeitet gefuellt, wartet hohl, weg aus).
+    static func punkt(agent a: WeltAgent) -> Punktart {
+        guard leben(a) != nil else { return punkt(zustand: a.zustand) }
+        switch a.leben?.stand {
+        case "arbeitet": return .laeuft
+        case "wartet": return .ruhig
+        default: return .aus
+        }
+    }
+
+    /// Das Wort neben dem Punkt: das Lebenszeichen, sonst das Zustandswort.
+    static func agentWort(_ a: WeltAgent, jetzt: Date = Date()) -> String { leben(a, jetzt: jetzt) ?? zustand(a.zustand) }
+
+    /// Die Gruende des Traegers als Wort (`zug_stand` in shell/agents_traeger.py); ein unbekannter bleibt roh.
+    static func grund(_ g: String?) -> String {
+        switch g ?? "" {
+        case "kontingent": "Kontingent erschöpft"
+        case "anmeldung": "Anmeldung fehlt"
+        case "recovery_limit": "Wiederholungsgrenze erreicht"
+        case "pausiert": "pausiert"
+        case "gestoppt": "gestoppt"
+        case "ungeklaert": "ungeklärter Lauf"
+        case "traeger_aus": "Träger läuft nicht"
+        case "startfehler": "Startfehler"
+        case "chain_limit": "Kettengrenze erreicht"
+        case "cycle": "Weckkreis erkannt"
+        case "nicht_erreichbar": "nicht erreichbar"
+        default: g ?? ""
+        }
+    }
+
+    static func zugArt(_ art: String?) -> String {
+        switch art ?? "" {
+        case "nachricht": "Nachricht"
+        case "ticket": "Ticket"
+        case "frage": "Antwort auf eine Frage"
+        case "recovery": "Wiederaufnahme"
+        default: art ?? ""
+        }
+    }
+
+    /// Der Stand unter der eigenen Nachricht als (Wort, Art); nil, wenn keiner gilt. Wie `antwortText` in welten-view.ts.
+    static func antwort(_ a: WeltAgent, jetzt: Date = Date()) -> (text: String, art: String)? {
+        guard let st = a.antwort else { return nil }
+        switch st.stand {
+        case "arbeitet": return ("\(a.name) arbeitet …", "arbeitet")
+        case "beendet": return ("Zug endete ohne Antwort: \(grund(st.grund))", "beendet")
+        case "nicht_erreichbar": return ("zugestellt · Träger nicht erreichbar", "weg")
+        default: break
+        }
+        if let d = datum(st.zeit), jetzt.timeIntervalSince(d) >= nichtGestartetNach {
+            return (st.grund.map { "Träger hat den Zug nicht gestartet: \(grund($0))" } ?? "Träger hat den Zug nicht gestartet", "nicht_gestartet")
+        }
+        switch st.wecken {
+        case "gestartet": return ("zugestellt · Träger geweckt", "zugestellt")
+        case "laeuft": return ("zugestellt · Träger lief schon", "zugestellt")
+        case "fehler": return ("zugestellt · Träger nicht geweckt", "zugestellt")
+        default: return ("zugestellt", "zugestellt")
         }
     }
 
