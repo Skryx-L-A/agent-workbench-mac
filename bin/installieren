@@ -1,0 +1,74 @@
+#!/bin/bash
+# installieren [Zielpfad] [--ohne-bau] -- legt die Mac-native Werkbank in den
+# Programme-Ordner, damit sie sich wie jedes andere Programm starten laesst:
+# Doppelklick im Finder, Spotlight, Launchpad, Dock.
+#
+# Anders als das Electron-Buendel (app/tools/buendel-bauen.sh) traegt dieses
+# Buendel seine ausfuehrbare Datei WIRKLICH in sich -- Swift baut ein Programm,
+# keinen Rahmen um einen Quellbaum. Deshalb wird hier kopiert und nicht
+# verwiesen, und nach jeder Aenderung an mac/ muss dieses Skript erneut laufen.
+#
+# Der Kern (app/, Electron kopflos) wird NICHT mitkopiert. Die App sucht ihn
+# neben dem Buendel und unter der Einstellung `macKernPfad`; weil das Buendel
+# hier im Programme-Ordner steht, wird die Einstellung gesetzt, sofern sie noch
+# fehlt (siehe mac/Sources/Werkbank/Kernstart.swift).
+set -euo pipefail
+MAC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+WURZEL="$(cd "$MAC/.." && pwd)"
+ZIEL="/Applications/Werkbank.app"
+BAUEN=1
+for arg in "$@"; do
+  case "$arg" in
+    --ohne-bau) BAUEN=0 ;;
+    -*) echo "Unbekannte Angabe: $arg" >&2; exit 2 ;;
+    *) ZIEL="$arg" ;;
+  esac
+done
+
+[ "$BAUEN" = 1 ] && bash "$MAC/bin/bauen" >/dev/null
+QUELLE="$MAC/build/Werkbank.app"
+[ -d "$QUELLE" ] || { echo "Buendel fehlt: $QUELLE (mac/bin/bauen)" >&2; exit 1; }
+
+# Erst vollstaendig danebenlegen, dann in einem Zug an die Zielstelle bewegen:
+# ein Abbruch mittendrin laesst so kein halbes Programm im Ordner zurueck.
+WERKSTATT="$(mktemp -d)"
+trap 'rm -rf "$WERKSTATT"' EXIT
+ditto "$QUELLE" "$WERKSTATT/Werkbank.app"
+# Das Kopieren macht die Ad-hoc-Signatur nicht ungueltig, ein Nachsignieren
+# schadet aber nicht und faengt den Fall ab, dass ditto Erweiterungsattribute
+# verliert.
+codesign --force --deep --sign - "$WERKSTATT/Werkbank.app" 2>/dev/null || true
+rm -rf "$ZIEL"
+mv "$WERKSTATT/Werkbank.app" "$ZIEL"
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$ZIEL"
+
+# Den Kernpfad eintragen, wenn noch keiner dasteht UND wirklich ein Kern
+# gefunden wurde. Zwei Kandidaten, wie Kernstart.swift kernPfadFinden: im
+# bewohnten Baum liegt app/ neben mac/ (WURZEL/app, unveraendert); im
+# veroeffentlichten Mac-Repo (ohne mac/-Praefix) liegt dort kein app/ mehr --
+# der Kern kommt aus einem daneben geklonten Geschwister-Repo agent-workbench
+# (Umfang werkbank), siehe INSTALL.md. Ungeprueft haette der Lauf frueher immer
+# "WURZEL/app" gesetzt, auch wenn dort gar kein Kern liegt -- ein Wert, der
+# nichts falsch macht (Kernstart.istKern verwirft ihn und sucht weiter), aber
+# eine Sicherheit vorspiegelt, die er nicht hat.
+kern_gefunden() { [ -f "$1/package.json" ] && [ -f "$1/dist/main/main.js" ]; }
+KERN=""
+for k in "$WURZEL/app" "$WURZEL/agent-workbench/app"; do
+  kern_gefunden "$k" && { KERN="$k"; break; }
+done
+if command -v wb-state >/dev/null 2>&1; then
+  VORHANDEN="$(wb-state settings get macKernPfad 2>/dev/null || true)"
+  case "$VORHANDEN" in
+    ""|null|"(nicht gesetzt)")
+      if [ -n "$KERN" ]; then
+        wb-state settings set macKernPfad "$KERN" >/dev/null && echo "macKernPfad gesetzt: $KERN"
+      else
+        echo "kein gebauter Kern gefunden (weder $WURZEL/app noch $WURZEL/agent-workbench/app) -- macKernPfad nicht gesetzt."
+        echo "Nach dem Bauen des Kerns: wb-state settings set macKernPfad <Pfad zu dessen app/>"
+      fi ;;
+    *) echo "macKernPfad steht schon: $VORHANDEN" ;;
+  esac
+fi
+
+echo "Fertig: $ZIEL"
+echo "Nach jeder Aenderung an mac/ erneut aufrufen (das Buendel traegt sein Programm in sich)."

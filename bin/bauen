@@ -1,0 +1,87 @@
+#!/bin/bash
+# bauen [--debug] -- baut die Mac-native Werkbank und legt das App-Buendel an.
+#
+#   mac/build/Werkbank.app   das Buendel (Info.plist, Symbol aus assets/werkbank.svg)
+#   mac/build/awbmac-ctl     der Steuerclient fuer Pruefungen
+#
+# SwiftPM reicht (kein xcodebuild): `swift build` liefert die ausfuehrbaren
+# Dateien, das Buendel entsteht hier von Hand. SwiftTerm bringt ein
+# Ressourcenbuendel mit (Metal-Shader); es wandert nach Contents/Resources,
+# wo `Bundle.module` es findet. Ad-hoc-Signatur, damit macOS 26 die App startet.
+set -euo pipefail
+MAC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+KONF=release
+[ "${1:-}" = "--debug" ] && KONF=debug
+cd "$MAC"
+# Beide Produkte, nacheinander: mit zwei `--product` baut swift build nur das
+# letzte (gemessen 06.09.: die App blieb dreimal alt, awbmac-ctl frisch).
+swift build -c "$KONF" --product Werkbank
+swift build -c "$KONF" --product awbmac-ctl
+BIN="$MAC/.build/$KONF"
+APP="$MAC/build/Werkbank.app"
+rm -rf "$APP"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$MAC/build"
+cp "$BIN/Werkbank" "$APP/Contents/MacOS/Werkbank"
+cp "$BIN/awbmac-ctl" "$MAC/build/awbmac-ctl"
+for b in "$BIN"/*.bundle; do
+  [ -d "$b" ] && cp -R "$b" "$APP/Contents/Resources/"
+done
+
+# DAS SYMBOL (06.09.2026, Auftrag 4.3). Gezeichnet als Vektor
+# (assets/werkbank.svg, regeln/medien.md), hier in die zehn Groessen gerendert,
+# die `iconutil` fuer ein .icns erwartet. Beides gehoert NICHT in den Baum: das
+# .icns ist ein Bauergebnis wie die ausfuehrbare Datei daneben.
+#
+# Fehlt rsvg-convert, bleibt das Buendel ohne eigenes Symbol -- die App startet
+# unveraendert, sie traegt dann nur das systemische Platzhaltersymbol. Ein
+# fehlendes Werkzeug haelt einen Bau nicht auf; die Zeile sagt, was fehlt.
+# DASSELBE SYMBOL WIE DIE ELECTRON-FASSUNG (08.09.2026, der Nutzer: „achte darauf,
+# dass die neue Workbench auch die richtigen Icons bekommt"). Die Werkbank ist EIN
+# Programm mit zwei Oberflaechen; ihr Symbol ist das fertige assets/AppIcon.icns
+# (gewaehlt aus assets/kandidaten/), nicht ein zweites, das nur der Mac traegt.
+# Das gezeichnete mac/assets/werkbank.svg bleibt Rueckfall, wenn das .icns fehlt.
+FERTIG="$MAC/../assets/AppIcon.icns"
+SYMBOL="$MAC/assets/werkbank.svg"
+if [ -f "$FERTIG" ]; then
+  cp "$FERTIG" "$APP/Contents/Resources/Werkbank.icns"
+elif [ -f "$SYMBOL" ] && command -v rsvg-convert >/dev/null 2>&1 && command -v iconutil >/dev/null 2>&1; then
+  ISET="$MAC/build/Werkbank.iconset"
+  rm -rf "$ISET"; mkdir -p "$ISET"
+  # Name je Groesse: iconutil liest die Namen, nicht die Bildgroesse.
+  for paar in "16 icon_16x16" "32 icon_16x16@2x" "32 icon_32x32" "64 icon_32x32@2x" \
+              "128 icon_128x128" "256 icon_128x128@2x" "256 icon_256x256" "512 icon_256x256@2x" \
+              "512 icon_512x512" "1024 icon_512x512@2x"; do
+    set -- $paar
+    rsvg-convert -w "$1" -h "$1" "$SYMBOL" -o "$ISET/$2.png"
+  done
+  iconutil -c icns "$ISET" -o "$APP/Contents/Resources/Werkbank.icns"
+  rm -rf "$ISET"
+else
+  echo "bauen: kein Symbol gebaut (rsvg-convert oder iconutil fehlt) -- das Buendel bekommt das Systemsymbol" >&2
+fi
+cat > "$APP/Contents/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleDevelopmentRegion</key><string>de</string>
+  <key>CFBundleExecutable</key><string>Werkbank</string>
+  <key>CFBundleIconFile</key><string>Werkbank</string>
+  <key>CFBundleIdentifier</key><string>agent-workbench.werkbank</string>
+  <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+  <key>CFBundleName</key><string>Werkbank</string>
+  <key>CFBundleDisplayName</key><string>Werkbank</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>0.1</string>
+  <key>CFBundleVersion</key><string>1</string>
+  <key>LSMinimumSystemVersion</key><string>26.0</string>
+  <key>NSHighResolutionCapable</key><true/>
+  <key>NSSupportsAutomaticGraphicsSwitching</key><true/>
+  <key>NSHumanReadableCopyright</key><string>der Nutzer the user</string>
+  <key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
+</dict>
+</plist>
+PLIST
+printf 'APPL????' > "$APP/Contents/PkgInfo"
+codesign --force --sign - "$APP" >/dev/null 2>&1 || echo "bauen: Ad-hoc-Signatur fehlgeschlagen (App startet meist trotzdem)" >&2
+echo "gebaut: $APP ($KONF)"

@@ -1,0 +1,8 @@
+#!/bin/bash
+# Reicht an den gebauten Steuerclient durch (mac/bin/bauen), sonst an die Debug-Fassung.
+MAC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+for k in "$MAC/build/awbmac-ctl" "$MAC/.build/release/awbmac-ctl" "$MAC/.build/debug/awbmac-ctl"; do
+  [ -x "$k" ] && exec "$k" "$@"
+done
+echo "awbmac-ctl: nicht gebaut -- mac/bin/bauen" >&2
+exit 2

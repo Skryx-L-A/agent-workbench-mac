@@ -1,0 +1,364 @@
+#!/bin/bash
+# starten [--kopflos|--ohne-fokus] [--terminal strom|attach] [--stop] [--status]
+#
+# Startet den Kern (app/ kopflos, wie `shell/wb-dev --kopflos`) und die
+# Mac-App -- kopflos ohne sichtbares Fenster fuer Pruefungen, sonst sichtbar.
+#
+# --ohne-fokus liegt dazwischen: das Fenster steht auf dem Bildschirm (nur dann
+# zeichnet AppKit eine `List` oder eine `Table`), aber die App wird nie aktiviert
+# -- fuer eine Sichtpruefung mit `wb-shot`, waehrend ein Mensch an derselben
+# Maschine arbeitet (regeln/aufnahmen.md).
+#
+# Laufverzeichnis: $AWBMAC_LAUFDIR, Vorgabe ~/.config/agent-workbench/mac-lauf.
+# Darin: kern.pid, app.pid, kern.log, app.log, mantel.sock (Kern <-> App),
+# awb.sock (Steuerkanal des Kerns, awb-ctl), awbmac.sock (awbmac-ctl).
+#
+# Alles, was der Kern sonst aus der Umgebung liest (AWB_TMUX_SOCKET,
+# AWB_SESSIONS_DIR, AWB_STATE_DIR, HOME …), reist unveraendert durch -- eine
+# Pruefung setzt es auf ihre Wegwerf-Umgebung, ein Mensch laesst es weg.
+#
+# Der Steuerkanal des Kerns liegt HIER, nicht auf dem Vorgabepfad
+# (awb-<uid>.sock): dort lauscht die laufende Electron-Werkbank, und zwei
+# Kerne an einem Pfad gibt es nicht (control.ts, clearStaleSocket).
+set -uo pipefail
+MAC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO="$(cd "$MAC/.." && pwd)"
+# Zwei Kandidaten fuer app/, wie Kernstart.swift kernPfadFinden (06.09.2026,
+# Nachtrag 15.09. fuer das veroeffentlichte Mac-Repo): im bewohnten Baum liegt
+# app/ neben mac/ (REPO/app, unveraendert). Im veroeffentlichten Mac-Repo (ohne
+# mac/-Praefix, publish/baue-repo.sh --umfang mac) liegt dort kein app/ mehr --
+# der Kern kommt aus einem daneben geklonten Geschwister-Repo agent-workbench
+# (Umfang werkbank), siehe INSTALL.md. Ein blosses `cd` reicht nicht, weil ein
+# unfertiger Klon (kein npm-Bau) sonst als Kern durchginge und erst beim Start
+# scheitert -- dieselbe Pruefung wie Kernstart.istKern.
+APP_KERN="$REPO/app"
+if ! { [ -f "$APP_KERN/package.json" ] && [ -f "$APP_KERN/dist/main/main.js" ]; }; then
+  GESCHWISTER="$REPO/agent-workbench/app"
+  { [ -f "$GESCHWISTER/package.json" ] && [ -f "$GESCHWISTER/dist/main/main.js" ]; } && APP_KERN="$GESCHWISTER"
+fi
+LAUF="${AWBMAC_LAUFDIR:-$HOME/.config/agent-workbench/mac-lauf}"
+KOPFLOS=0; OHNE_FOKUS=0; STOP=0; STATUS=0; ART="${AWBMAC_TERMINAL:-strom}"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --kopflos) KOPFLOS=1 ;;
+    --ohne-fokus) OHNE_FOKUS=1 ;;
+    --terminal) shift; ART="$1" ;;
+    --terminal=*) ART="${1#--terminal=}" ;;
+    --stop) STOP=1 ;;
+    --status) STATUS=1 ;;
+    -h|--help) sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) echo "starten: unbekannte Angabe '$1'" >&2; exit 2 ;;
+  esac
+  shift
+done
+mkdir -p "$LAUF"
+export AWB_MANTEL_SOCKET="$LAUF/mantel.sock"
+export AWB_CONTROL_SOCKET="${AWB_CONTROL_SOCKET:-$LAUF/awb.sock}"
+export AWBMAC_CONTROL_SOCKET="${AWBMAC_CONTROL_SOCKET:-$LAUF/awbmac.sock}"
+export AWBMAC_TERMINAL="$ART"
+CTL="$MAC/bin/awbmac-ctl"
+
+lebt() { local p; p="$(cat "$1" 2>/dev/null)"; [ -n "$p" ] && kill -0 "$p" 2>/dev/null && echo "$p"; }
+
+# Ein Unix-Socket traegt hoechstens 103 Bytes Pfad (sun_path). Ein laengerer
+# Pfad liesse den Kern starten und die App scheitern (gemessen 06.09.: EINVAL
+# beim listen, der Kern blieb stehen). Also VOR dem ersten Prozess pruefen.
+pfad_pruefen() {
+  local p
+  for p in "$AWB_MANTEL_SOCKET" "$AWB_CONTROL_SOCKET" "$AWBMAC_CONTROL_SOCKET"; do
+    if [ "${#p}" -gt 103 ]; then
+      echo "starten: Socketpfad laenger als 103 Bytes (sun_path): $p -- kuerzeres AWBMAC_LAUFDIR waehlen" >&2
+      return 1
+    fi
+  done
+}
+
+# Der Kern DIESES Laufverzeichnisses ohne PID-Datei: die kopflosen Electron-
+# Prozesse dieses app/-Ordners, deren Umgebung unseren Mantel-Socket traegt
+# (ps -E zeigt die Umgebung eigener Prozesse). Faengt den Fall, dass die
+# PID-Datei weg ist (Laufverzeichnis geloescht, Datei ueberschrieben), ohne je
+# einen fremden Kern zu treffen: ein anderes Laufverzeichnis hat einen anderen
+# Socketpfad.
+kern_ohne_pid() {
+  local p
+  for p in $(pgrep -f "electron $APP_KERN --headless" 2>/dev/null); do
+    if ps -E -o command= -p "$p" 2>/dev/null | tr ' ' '\n' | grep -qx "AWB_MANTEL_SOCKET=$AWB_MANTEL_SOCKET"; then
+      echo "$p"
+    fi
+  done
+}
+
+# Dasselbe fuer die App: Werkbank-Prozesse, deren Umgebung UNSEREN Steuerkanal traegt.
+app_ohne_pid() {
+  local p
+  for p in $(pgrep -f "Werkbank.app/Contents/MacOS/Werkbank" 2>/dev/null); do
+    if ps -E -o command= -p "$p" 2>/dev/null | tr ' ' '\n' | grep -qx "AWBMAC_CONTROL_SOCKET=$AWBMAC_CONTROL_SOCKET"; then
+      echo "$p"
+    fi
+  done
+}
+
+# Einen Prozessbaum sicher beenden: erst TERM an ALLE Nachkommen (nicht nur
+# die direkten Kinder) und die Wurzel, dann KILL an alles, was noch lebt.
+#
+# REKURSIV, NICHT NUR EINE EBENE (08.09.2026, Gegenlesen-Nachtrag): ein
+# gemessener LAUFENDER Kern zeigt drei Ebenen -- Node-Wrapper (das ist
+# kern.pid) -> echter Electron-Prozess -> "Electron Helper --type=gpu-
+# process". `pgrep -P` nur auf die Wurzel angewendet erreichte bisher bloss
+# die zweite Ebene; der GPU-Helfer (dritte Ebene, Kind des echten Electron-
+# Prozesses) blieb unentdeckt -- und in den bisherigen Proben dieses Auftrags
+# nie geprueft, weil das Suchmuster dort nur auf "electron ... --headless"
+# passte, nicht auf "Electron Helper ...". Jetzt werden alle Ebenen VOR dem
+# ersten `kill` eingesammelt.
+#
+# <frist-sekunden> (Vorgabe 3): wie lange auf ein sauberes Ende nach TERM
+# gewartet wird, bevor KILL nachgesetzt wird. `abbruch()` uebergibt im
+# Signalpfad eine kuerzere Frist -- siehe dort.
+baum_beenden() {
+  local wurzel="$1" frist="${2:-3}" alle schicht neue kind enkel
+  # Getrennt von der `local`-Zeile darueber, nicht darin (gemessen: `local
+  # a=1 b="$a"` sieht $a unter `set -u` noch als unbound, weil `local` seine
+  # eigenen Bindungen erst NACH der ganzen Zeile herstellt).
+  alle="$wurzel"; schicht="$wurzel"
+  while [ -n "$schicht" ]; do
+    neue=""
+    for kind in $schicht; do
+      for enkel in $(pgrep -P "$kind" 2>/dev/null); do
+        case " $alle " in
+          *" $enkel "*) ;;
+          *) neue="$neue $enkel"; alle="$alle $enkel" ;;
+        esac
+      done
+    done
+    schicht="$neue"
+  done
+  kill $alle 2>/dev/null
+  local d=$((SECONDS+frist)); while [ $SECONDS -lt $d ] && kill -0 "$wurzel" 2>/dev/null; do sleep 0.2; done
+  for p in $alle; do kill -0 "$p" 2>/dev/null && kill -9 "$p" 2>/dev/null; done
+  return 0
+}
+
+stoppen() {
+  local p
+  if p="$(lebt "$LAUF/app.pid")"; then
+    "$CTL" quit >/dev/null 2>&1
+    local d=$((SECONDS+5)); while [ $SECONDS -lt $d ] && kill -0 "$p" 2>/dev/null; do sleep 0.2; done
+    kill -0 "$p" 2>/dev/null && kill "$p" 2>/dev/null
+    sleep 0.5; kill -0 "$p" 2>/dev/null && kill -9 "$p" 2>/dev/null
+  fi
+  if p="$(lebt "$LAUF/kern.pid")"; then
+    node "$APP_KERN/bin/awb-ctl" --socket "$AWB_CONTROL_SOCKET" quit >/dev/null 2>&1
+    local d=$((SECONDS+8)); while [ $SECONDS -lt $d ] && kill -0 "$p" 2>/dev/null; do sleep 0.2; done
+    kill -0 "$p" 2>/dev/null && baum_beenden "$p"
+  fi
+  # Und was die PID-Datei nicht kennt (06.09.: ein Kern blieb stehen, weil sein
+  # Laufverzeichnis nicht mehr zur Datei passte): jeden Kern mit UNSEREM
+  # Mantel-Socket in der Umgebung beenden.
+  for p in $(app_ohne_pid); do
+    echo "starten --stop: App ohne PID-Datei gefunden (PID $p), wird beendet" >&2
+    baum_beenden "$p"
+  done
+  for p in $(kern_ohne_pid); do
+    echo "starten --stop: Kern ohne PID-Datei gefunden (PID $p), wird beendet" >&2
+    baum_beenden "$p"
+  done
+  rm -f "$LAUF/app.pid" "$LAUF/kern.pid" "$LAUF/mantel.sock" "$LAUF/awbmac.sock"
+  [ "$AWB_CONTROL_SOCKET" = "$LAUF/awb.sock" ] && rm -f "$LAUF/awb.sock"
+  return 0
+}
+
+status() {
+  local k a
+  k="$(lebt "$LAUF/kern.pid")" || k=""
+  a="$(lebt "$LAUF/app.pid")" || a=""
+  echo "Laufverzeichnis: $LAUF"
+  echo "Kern: ${k:-laeuft nicht}   App: ${a:-laeuft nicht}   Terminal: $ART"
+  [ -n "$k" ] && [ -n "$a" ]
+}
+
+if [ "$STOP" = 1 ]; then stoppen; echo "beendet"; exit 0; fi
+if [ "$STATUS" = 1 ]; then status; exit $?; fi
+pfad_pruefen || exit 1
+
+# WER HIER STARTET, RAEUMT BEI ABBRUCH AUCH AUF (06.09.2026): bis dahin liess
+# ein gescheiterter App-Start den eben gestarteten Kern stehen -- kein Fenster,
+# kein Aufraeumer, ein Electron-Baum als Waise. Was dieser Aufruf selbst
+# gestartet hat, beendet er bei jedem Fehlerausgang wieder; ein Kern, der schon
+# lief, bleibt in Ruhe (der gehoert einem anderen Aufruf).
+#
+# DASSELBE GILT FUER EIN SIGNAL VON AUSSEN (08.09.2026, Folgeauftrag waisen):
+# ohne einen eigenen `trap` stirbt dieses Skript an einem externen TERM/INT/HUP
+# sofort und OHNE abbruch() je aufzurufen -- gemessen fuehrte genau das zu
+# liegenbleibenden Kernen: `shell/tests/run-all.sh` haengt jede Suite in
+# `timeout 300 ...` OHNE `--foreground` und OHNE `-k`; GNU timeout legt das
+# Kommando dabei in eine EIGENE Prozessgruppe und schickt beim Ablauf TERM an
+# die ganze Gruppe. Braucht eine Suite unter Last laenger als ihr Zeitfenster,
+# waehrend `starten` gerade auf Kern- oder App-Bereitschaft wartet, trifft
+# dasselbe TERM `starten` UND den gerade gestarteten Kern/App gleichzeitig --
+# und ohne eigenen `trap` beendet sich `starten` sofort, ohne den Kern/die App
+# zu verifizieren oder notfalls mit KILL nachzufassen. Reagiert der Kern/die
+# App nicht sofort auf sein eigenes TERM (naheliegend: er haengt ja gerade
+# deshalb, weil er noch nicht fertig initialisiert ist), bleibt er als Waise
+# stehen -- PPID 1, niemand schickt je ein KILL nach. Nachgestellt mit einem
+# haengenden Ersatz-Kern unter `timeout 3 mac/bin/starten --kopflos`: ohne
+# diesen `trap` blieb der Ersatz-Kern nachweislich am Leben, RC=124, leeres
+# Protokoll (starten kam nicht einmal bis zur ersten Log-Zeile). Der `trap`
+# hier macht ein externes Signal zu genau demselben Fall wie ein interner
+# Fehlerausgang: `abbruch` raeumt auf, was DIESER Aufruf selbst gestartet hat.
+# GEGENLESEN 08.09.2026 (zweite Runde, Commit 17a96f4 geprueft) -- vier
+# eigenstaendige Nachbesserungen an diesem `trap`/`abbruch`-Mechanismus:
+#
+#   1  WIEDEREINTRITT: `abbruch` schaltet sich als ALLERERSTES selbst ab
+#      (`trap '' TERM INT HUP`, `trap - EXIT`). Ohne das koennte ein zweites
+#      Signal waehrend des laufenden Aufraeumens (baum_beenden/stoppen
+#      brauchen bis zu ein paar Sekunden) `abbruch` ein zweites Mal anstossen
+#      -- doppelte baum_beenden-Aufrufe auf denselben PIDs, verdoppelte
+#      Log-Zeilen, ein unklarer Endzustand.
+#
+#   2  PID-WIEDERVERWENDUNG: `p="$(cat app.pid)"` ohne Lebendpruefung wuerde
+#      im (seltenen) Fall, dass die App zwischen dem Schreiben der PID-Datei
+#      und diesem Zeitpunkt schon gestorben ist UND die Nummer inzwischen ein
+#      voellig anderer Prozess traegt, genau DIESEN fremden Prozess treffen.
+#      `lebt()` (dieselbe Pruefung, die `stoppen()` schon ueberall benutzt)
+#      schliesst das nicht vollstaendig aus, aber verlangt wenigstens, dass
+#      UEBERHAUPT ein Prozess mit dieser Nummer lebt, statt blind zu kill'en.
+#
+#   3  EXIT-CODE: ein Abbruch durch TERM/INT/HUP endete bisher wie ein
+#      gewoehnlicher Startfehler (`exit 1`) -- ununterscheidbar fuer den
+#      Aufrufer (run-all.sh, ein Mensch). Jetzt 128+Signalnummer (143 fuer
+#      TERM, 130 fuer INT, 129 fuer HUP), der ueblichen Shell-Konvention
+#      folgend; ein interner Fehlerausgang (kein Signal) bleibt bei `exit 1`.
+#
+#   4  ZEITDECKEL IM SIGNALPFAD: der bisherige Weg (volles `stoppen()` mit
+#      hoeflicher RPC-Anfrage an den Kern, 5+8 Sekunden Wartezeit, dazu
+#      `baum_beenden`s eigene 3 Sekunden) kann fast 16 Sekunden dauern. Steht
+#      bereits EIN Signal gegen uns (ein `timeout -k`, ein zweites Ctrl-C),
+#      ist unklar, ob wir ueberhaupt so lange leben -- werden WIR vorher
+#      abgeschossen, kommt das KILL an Kern/App nie raus. Im Signalpfad
+#      deshalb sofort auf eine kurze Frist (1 Sekunde TERM-Wartezeit, dann
+#      KILL) umstellen, ohne den Umweg ueber die hoefliche RPC-Anfrage --
+#      dafuer ist keine Zeit mehr, wenn schon ein Signal gegen uns steht. Der
+#      interne Fehlerausgang (kein akutes Aussensignal) behaelt die
+#      grosszuegigeren Fristen von `stoppen()`.
+#
+# Registriert wird mit drei Auspraegungen von $1: eine Signalnummer (TERM/
+# INT/HUP, siehe die drei `trap`-Zeilen unten) fuer ein echtes Aussensignal,
+# das Wort "EXIT" fuer den Fangnetz-Trap unten (Risiko 5: ein harter Ausstieg
+# ohne Signal, z. B. eine unter `set -u` unerwartet unbelegte Variable, soll
+# denselben Waisen nicht hinterlassen) -- dort wird NICHT `exit` aufgerufen,
+# damit der urspruengliche Exit-Code erhalten bleibt --, und kein Argument
+# fuer die bestehenden internen Fehlerausgaenge (Kern/App-Bereitschaft nicht
+# erreicht), die weiterhin `exit 1` wollen.
+KERN_SELBST=0
+APP_SELBST=0
+abbruch() {
+  local sig="${1:-}" frist=3 p
+  trap '' TERM INT HUP
+  trap - EXIT
+  case "$sig" in ''|EXIT) ;; *) frist=1 ;; esac
+
+  if [ "$APP_SELBST" = 1 ]; then
+    echo "starten: raeume die eben gestartete App wieder ab" >&2
+    p="$(lebt "$LAUF/app.pid")" && baum_beenden "$p" "$frist"
+    rm -f "$LAUF/app.pid"
+    APP_SELBST=0
+  fi
+  if [ "$KERN_SELBST" = 1 ]; then
+    echo "starten: raeume den eben gestarteten Kern wieder ab" >&2
+    if [ "$sig" != '' ] && [ "$sig" != EXIT ]; then
+      p="$(lebt "$LAUF/kern.pid")" && baum_beenden "$p" "$frist"
+      rm -f "$LAUF/kern.pid" "$LAUF/mantel.sock"
+      [ "$AWB_CONTROL_SOCKET" = "$LAUF/awb.sock" ] && rm -f "$LAUF/awb.sock"
+    else
+      stoppen
+    fi
+    KERN_SELBST=0
+  fi
+
+  case "$sig" in
+    EXIT) return 0 ;;                    # urspruenglichen Exit-Code NICHT ueberschreiben
+    '') exit 1 ;;                        # interner Fehlerausgang, wie bisher
+    *) exit $((128+sig)) ;;              # echtes Signal: 128+Signalnummer
+  esac
+}
+trap 'abbruch 15' TERM
+trap 'abbruch 2' INT
+trap 'abbruch 1' HUP
+trap 'abbruch EXIT' EXIT
+
+# Erfolgreicher Abschluss: die beiden SELBST-Merker zuruecksetzen und JEDEN
+# trap wieder abschalten, BEVOR ein `exit 0` diesen Punkt verlaesst (Risiko 7:
+# sonst raeumt ein Signal, das GENAU zwischen dem letzten Bereitschafts-Beweis
+# und dem Skriptende eintrifft, einen fertig gestarteten, gesund laufenden
+# Kern/App wieder ab -- fuer den ist der Aufruf ja gerade erfolgreich zu Ende).
+# Zwei Fundstellen brauchen das, nicht nur die letzte Zeile der Datei: auch
+# der fruehe Erfolgsausgang "App laeuft bereits" weiter unten, wenn DIESER
+# Aufruf selbst gerade noch den Kern gestartet hat (KERN_SELBST=1) und nur die
+# App schon anderweitig lief.
+erfolg() { KERN_SELBST=0; APP_SELBST=0; trap - TERM INT HUP EXIT; exit 0; }
+
+[ -x "$APP_KERN/node_modules/.bin/electron" ] || { echo "starten: app/node_modules fehlt -- 'npm install' in app/" >&2; exit 1; }
+[ -f "$APP_KERN/dist/main/main.js" ] || (cd "$APP_KERN" && npm run build >/dev/null 2>&1) || { echo "starten: app/dist fehlt und laesst sich nicht bauen" >&2; exit 1; }
+WERKBANK="$MAC/build/Werkbank.app/Contents/MacOS/Werkbank"
+[ -x "$WERKBANK" ] || { echo "starten: $WERKBANK fehlt -- mac/bin/bauen" >&2; exit 1; }
+
+if p="$(lebt "$LAUF/kern.pid")"; then
+  echo "Kern laeuft bereits (PID $p)"
+else
+  # Token fuer den Handschlag: zufaellig je Lauf, nur in der Umgebung der beiden Prozesse.
+  AWB_MANTEL_TOKEN="$(head -c 16 /dev/urandom | xxd -p)"
+  export AWB_MANTEL_TOKEN
+  umask 077; printf '%s' "$AWB_MANTEL_TOKEN" > "$LAUF/mantel.token"; umask 022
+  : > "$LAUF/kern.log"
+  "$APP_KERN/node_modules/.bin/electron" "$APP_KERN" --headless >>"$LAUF/kern.log" 2>&1 &
+  echo $! > "$LAUF/kern.pid"
+  KERN_SELBST=1
+  d=$((SECONDS+60))
+  while [ $SECONDS -lt $d ]; do
+    grep -q '^awb-ready ' "$LAUF/kern.log" && break
+    # Kein `rm -f kern.pid` mehr VOR abbruch (08.09.2026, Gegenlesen -- dieselbe
+    # Asymmetrie, die beim App-Zweig schon behoben wurde): stoppen(), das
+    # abbruch() hier ueber KERN_SELBST anstoesst, liest die PID-Datei selbst
+    # und entfernt sie am Ende ohnehin -- eine vorzeitige Loeschung bringt
+    # nichts, nur ein abweichendes Muster gegenueber dem App-Zweig.
+    kill -0 "$(cat "$LAUF/kern.pid")" 2>/dev/null || { echo "starten: der Kern ist sofort wieder beendet:" >&2; tail -15 "$LAUF/kern.log" >&2; abbruch; }
+    sleep 0.3
+  done
+  grep -q '^awb-ready ' "$LAUF/kern.log" || { echo "starten: der Kern meldete keine Bereitschaft (60 s)" >&2; tail -15 "$LAUF/kern.log" >&2; abbruch; }
+  echo "Kern laeuft (PID $(cat "$LAUF/kern.pid")), Steuerkanal $AWB_CONTROL_SOCKET"
+fi
+[ -n "${AWB_MANTEL_TOKEN:-}" ] || AWB_MANTEL_TOKEN="$(cat "$LAUF/mantel.token" 2>/dev/null)"
+export AWB_MANTEL_TOKEN
+
+if p="$(lebt "$LAUF/app.pid")"; then
+  echo "App laeuft bereits (PID $p)"
+  erfolg
+fi
+ARGS=(--terminal "$ART")
+[ "$KOPFLOS" = 1 ] && ARGS+=(--kopflos)
+[ "$OHNE_FOKUS" = 1 ] && ARGS+=(--ohne-fokus)
+: > "$LAUF/app.log"
+"$WERKBANK" "${ARGS[@]}" >>"$LAUF/app.log" 2>&1 &
+echo $! > "$LAUF/app.pid"
+APP_SELBST=1
+d=$((SECONDS+30))
+while [ $SECONDS -lt $d ]; do
+  "$CTL" ping >/dev/null 2>&1 && break
+  # Kein `rm -f app.pid` hier mehr VOR abbruch (08.09.2026, derselbe Fehler wie
+  # beim `trap` oben, nur ohne externes Signal): abbruch()/APP_SELBST braucht
+  # die PID-Datei noch, um die App zuverlaessig (mit KILL-Nachfassen) zu
+  # beenden, statt sie nur aus der Buchhaltung zu streichen.
+  kill -0 "$(cat "$LAUF/app.pid")" 2>/dev/null || { echo "starten: die App ist sofort wieder beendet:" >&2; tail -15 "$LAUF/app.log" >&2; abbruch; }
+  sleep 0.2
+done
+# War hier vorher ein einzelnes unverifiziertes `kill` (SIGTERM) gefolgt von
+# sofortigem `rm -f app.pid` -- ignoriert die App das TERM (z. B. weil sie noch
+# nicht so weit ist, es zu verarbeiten, exakt der Fall, der sie hier hinfuehrt),
+# blieb sie als Waise stehen, ohne dass ihr je ein KILL nachgeschickt wurde.
+# abbruch() (APP_SELBST=1) beendet jetzt mit demselben verifizierten
+# TERM-dann-KILL wie baum_beenden ueberall sonst in diesem Skript.
+"$CTL" ping >/dev/null 2>&1 || { echo "starten: die App meldete keinen Steuerkanal (30 s)" >&2; tail -15 "$LAUF/app.log" >&2; abbruch; }
+if [ "$KOPFLOS" = 1 ]; then echo "App laeuft kopflos (PID $(cat "$LAUF/app.pid")), Steuerkanal $AWBMAC_CONTROL_SOCKET"
+elif [ "$OHNE_FOKUS" = 1 ]; then echo "App laeuft sichtbar ohne Fokus (PID $(cat "$LAUF/app.pid")), Steuerkanal $AWBMAC_CONTROL_SOCKET"
+else echo "App laeuft sichtbar (PID $(cat "$LAUF/app.pid"))"; fi
+erfolg
