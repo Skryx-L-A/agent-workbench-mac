@@ -117,7 +117,13 @@
 //   {"cmd":"welten"}                                                  Fenster „Agents-Welten …": Auskunft
 //   {"cmd":"welten","was":"zeigen|welt|waehlen|darstellung|klappen|reiter|blatt|gespraech|adressen|
 //          senden|antworten|zuruecknehmen|pause|stoppen|bestaetigen|abbrechen|ticket|ticketfilter|
-//          ticket-neu|inspektor|fenster|erscheinung","wert":"…","arg":"…"}
+//          ticket-neu|inspektor|fenster|erscheinung|quittieren|rueckgabe|zurueckgeben|profil|
+//          profil-feld|gedaechtnis|gedaechtnis-text|skill-abnehmen|skill-ablehnen|skill-zeigen|
+//          anlegen|anlegen-feld|welt-neu|welt-neu-auf|maschinen|umziehen","wert":"…","arg":"…"}
+//        `anlegen` kennt oeffnen|abbrechen|vorlage|vorschlag|pruefen|hausvorlage|sichern|
+//          ansicht gespraech|formular|gespraech <text> [modell] [trocken]|vorschlagen (Anlege-Menue,
+//          agentschat 15.09.2026); `anlegen-feld` setzt ein Formularfeld, `welt-neu-auf` legt eine Welt
+//          auf einer Agent-Maschine an, `umziehen` bringt sie dorthin (fernwelten 15.09.2026).
 //   {"cmd":"figuren-schuss","pfad":"/…/bild.png","dunkel":"1"}      Belegbild des Vorschau-Blatts
 //   {"cmd":"quit"}                        sauber beenden
 import Foundation

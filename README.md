@@ -1,9 +1,21 @@
+<img src="assets/werkbank.svg" width="88" align="left" alt="Workbench icon">
+
 # agent-workbench-mac
 
-A native macOS shell for the agent workbench: SwiftUI and AppKit instead of a window around a
+**A native macOS shell for the agent workbench:** SwiftUI and AppKit instead of a window around a
 browser engine. It drives the same headless core the Electron window drives — same sessions, same
-worker panes, same control channel — through a small wire protocol instead of Node's IPC. Terminal
-panes render with SwiftTerm; the editor's syntax highlighting comes from Highlightr.
+worker panes, same Agents tab, same control channel — through a small wire protocol instead of
+Node's IPC. Terminal panes render with SwiftTerm; the editor's syntax highlighting comes from
+Highlightr.
+
+<br clear="left">
+
+<p align="center"><img src="assets/vorschau-mac-agents-dunkel.png" alt="The Agents tab of the Mac shell: a main agent in its chat, with a question waiting for an answer" width="900"></p>
+
+<p align="center"><img src="assets/vorschau-mac-uebersicht-dunkel.png" alt="The overview of a world: agents, open tickets, the latest channel messages" width="900"></p>
+
+Both pictures come from a demo world that the acceptance tooling creates on its own; nothing in
+them belongs to a real machine.
 
 ## This repository is the Mac shell alone
 
