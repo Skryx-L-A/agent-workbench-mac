@@ -338,7 +338,8 @@ struct WeltAntrag: Equatable, Identifiable, Sendable {
 struct AgentEntwurf: Equatable, Sendable {
     var id = "", stufe = "mitglied", team = "", spezialgebiet = "", modell = "sonnet5", denkstufe = "high"
     var fallback = "", fallbackDenkstufe = "", maschine = "peer"
-    var werkzeuge: [String] = ["Read"]
+    // Jede Stufe schreibt (15.09.2026); Web-Werkzeuge kommen nur auf Wahl dazu.
+    var werkzeuge: [String] = ["Read", "Grep", "Glob", "Bash", "Write", "Edit"]
     var bash = "", skills = "", kontextgrenze = ""
     var figurArt = "roboter", figurFarbe = "entwicklung"
     var anweisungen = "", vorlage = ""

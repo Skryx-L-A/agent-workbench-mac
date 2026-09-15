@@ -72,7 +72,8 @@ extension WeltenZustand {
 
     static let figurArten: [(String, String)] = [("roboter", "Roboter"), ("tier", "Tier"), ("linse", "Linse")]
     static let figurFarben: [(String, String)] = [("entwicklung", "Entwicklung"), ("recherche", "Recherche"), ("pruefung", "Prüfung"), ("gestaltung", "Gestaltung")]
-    static let werkzeuge = ["Read", "Grep", "Glob", "Bash", "Write", "Edit"]
+    // WebFetch und WebSearch sind je Agent wählbar (Rechercheagenten, 2026-09-15); die Vorgabe bleibt ohne Web.
+    static let werkzeuge = ["Read", "Grep", "Glob", "Bash", "Write", "Edit", "WebFetch", "WebSearch"]
 
     func anlegenOeffnen(_ n: WeltenNutzlast, _ w: Welt, vorlage: String? = nil) {
         var a = AnlegenEntwurf()
