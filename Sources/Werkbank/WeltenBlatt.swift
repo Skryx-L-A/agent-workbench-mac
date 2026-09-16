@@ -104,6 +104,8 @@ final class WeltenZustand {
     var rueckgabeText = ""
     var profilEntwurf: ProfilEntwurf?
     var gedaechtnisEntwurf: GedaechtnisEntwurf?
+    /// Auftrag agentsform: die Rechte eines bestehenden Agenten in Bearbeitung (nur, wenn die Bibliothek `wb-agent rechte` kennt).
+    var rechteEntwurf: RechteEntwurf?
     /// Das offene Anlege-Menue (WeltenAnlegen.swift); solange es steht, zeigt die Mitte das Formular.
     var anlegen: AnlegenEntwurf?
     /// Auftrag fernwelten: die Frage, auf welcher Maschine die globale Welt entsteht; nil = keine offen.
@@ -146,6 +148,19 @@ final class WeltenZustand {
         var text: String
         let sha: String
     }
+    /// Werkzeuge ohne Bash (das bleibt), nur die eigenen Bash-Muster (eins je Zeile), Skills.
+    struct RechteEntwurf: Equatable {
+        let agent: String
+        var werkzeuge: [String]
+        var bash: String
+        var skills: [String]
+        init(_ a: WeltAgent, dienstweg: [String]) {
+            agent = a.id
+            werkzeuge = a.werkzeuge.filter { $0 != "Bash" }
+            bash = AgentEntwurf.eigeneMuster(a.bash, dienstweg).joined(separator: "\n")
+            skills = a.skills
+        }
+    }
 
     @ObservationIgnored weak var kern: KernVerbindung?
     var darstellungMerken: (String) -> Void = { _ in }
@@ -172,6 +187,7 @@ final class WeltenZustand {
         adressfeld = ""
         profilEntwurf = nil
         gedaechtnisEntwurf = nil
+        rechteEntwurf = nil
         anlegen = nil
         if let w = welt(n) { gesehen(w, echt: echt) }
     }
@@ -184,6 +200,7 @@ final class WeltenZustand {
         rueckgabeOffen = nil
         if profilEntwurf?.agent != agentId { profilEntwurf = nil }
         if gedaechtnisEntwurf?.agent != agentId { gedaechtnisEntwurf = nil }
+        if rechteEntwurf?.agent != agentId { rechteEntwurf = nil }
         gesehen(welt, echt: echt)
     }
 
@@ -377,6 +394,39 @@ final class WeltenZustand {
             return
         }
         if await ausfuehren("profil", d, echt: echt) { profilEntwurf = nil }
+    }
+
+    /// Auftrag agentsform: die Rechte eines bestehenden Agenten sichern (`welt:rechte`, `wb-agent rechte`).
+    func rechteSichern(_ w: Welt, echt: Bool) async {
+        guard let e = rechteEntwurf else { return }
+        let muster = e.bash.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        if await ausfuehren("rechte", ["welt": w.pfad, "agent": e.agent, "werkzeuge": ["Bash"] + e.werkzeuge, "bash": muster, "skills": e.skills], echt: echt) {
+            rechteEntwurf = nil
+        }
+    }
+
+    /// Ein Werkzeug der Rechte in Bearbeitung; nil, wenn es ging, sonst der Grund.
+    @discardableResult
+    func rechteWerkzeug(_ name: String, _ an: Bool, _ w: Welt) -> String? {
+        guard var e = rechteEntwurf else { return "Keine Rechte in Bearbeitung." }
+        if name == "Bash" { return an ? nil : "Bash gehört zum Dienstweg und bleibt dabei." }
+        if Self.webWerkzeuge.contains(name), an, !w.webZugang { return Self.webOhneZugang(w.webZugangBefehl) }
+        if an, !e.werkzeuge.contains(name) { e.werkzeuge.append(name) }
+        if !an { e.werkzeuge.removeAll { $0 == name } }
+        rechteEntwurf = e
+        return nil
+    }
+
+    func rechteSkill(_ name: String, _ an: Bool) {
+        guard var e = rechteEntwurf else { return }
+        if an, !e.skills.contains(name) { e.skills.append(name) }
+        if !an { e.skills.removeAll { $0 == name } }
+        rechteEntwurf = e
+    }
+
+    /// Auftrag agentsform: einen gemerkten Projektordner aus der Liste nehmen; der Kern fragt zurueck, der Ordner bleibt.
+    func vergessen(_ ordner: String, echt: Bool) async {
+        _ = await ausfuehren("vergessen", ["ordner": ordner], echt: echt)
     }
 
     /// Mit dem Stand, den der Editor geladen hat: hat der Agent inzwischen geschrieben, lehnt die Bibliothek ab.
@@ -694,6 +744,9 @@ extension View {
             // Ein Umzug loescht nichts (die alte Ablage bleibt umbenannt liegen): kein destruktiver Knopf.
             if rf.handlung == "umziehen" {
                 Button("Umziehen") { Task { await zustand.bestaetigen() } }.keyboardShortcut(.defaultAction)
+            } else if rf.handlung == "vergessen" {
+                // Auftrag agentsform: nur der Eintrag der Liste geht; Ordner und Welt bleiben.
+                Button("Entfernen") { Task { await zustand.bestaetigen() } }.keyboardShortcut(.defaultAction)
             } else {
                 Button(rf.handlung == "stoppen" ? "Stoppen" : "Zurücknehmen", role: .destructive) { Task { await zustand.bestaetigen() } }
             }
@@ -2055,15 +2108,67 @@ struct WeltenInspektor: View {
                 feld("Modell", a.modell + (a.denkstufe.isEmpty || a.modell.hasSuffix(":\(a.denkstufe)") ? "" : " · \(a.denkstufe)"), mono: true)
                 feld("Fallback", a.fallback, mono: true)
                 feld("Maschine", WeltenWorte.maschine(a.maschine))
-                feld("Werkzeuge", a.werkzeuge.isEmpty ? "keine eingetragen" : a.werkzeuge.joined(separator: ", "), mono: !a.werkzeuge.isEmpty)
-                feld("Skills", a.skills.isEmpty ? "keine eingetragen" : a.skills.joined(separator: ", "))
-                if !a.bash.isEmpty { feld("Bash-Muster", a.bash.joined(separator: " · "), mono: true) }
                 if !a.kontextgrenze.isEmpty { feld("Kontextgrenze", a.kontextgrenze) }
                 feld("Angelegt", AgentsWorte.uhrzeit(a.angelegt) + (a.angelegtVon.map { " von \(welt.anzeigename($0))" } ?? "") + (a.vorlage.map { ", Vorlage \($0)" } ?? ""))
                 feld("Kennung", a.id, mono: true)
             }
         }
+        rechte(a)
     }
+
+    /// Auftrag agentsform: was der Agent darf. Aendern geht nur, wenn die Bibliothek `wb-agent rechte` kennt; sonst sagt der Knopf, warum nicht.
+    @ViewBuilder
+    private func rechte(_ a: WeltAgent) -> some View {
+        let dienstweg = zustand.kern?.welten?.dienstweg(a.stufe) ?? []
+        if let e = zustand.rechteEntwurf, e.agent == a.id, welt.rechteAenderbar {
+            gruppe("Rechte ändern") {
+                WeltenRechteAuswahl(
+                    welt: welt, werkzeuge: ["Bash"] + e.werkzeuge, skills: e.skills, dienstweg: dienstweg,
+                    bash: Binding(get: { zustand.rechteEntwurf?.bash ?? "" }, set: { zustand.rechteEntwurf?.bash = $0 }),
+                    werkzeug: { name, an in
+                        if let f = zustand.rechteWerkzeug(name, an, welt) { zustand.meldung = WeltenZustand.Meldung(text: f, ok: false) }
+                    },
+                    skill: { zustand.rechteSkill($0, $1) })
+                .controlSize(.small)
+                Label("Ein laufender Zug behält seine Rechte; der nächste liest die neuen. Der Verlauf nennt die Änderung.", systemImage: "info.circle")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 8) {
+                    Spacer()
+                    Button("Abbrechen") { zustand.rechteEntwurf = nil }
+                    Button("Sichern") { Task { await zustand.rechteSichern(welt, echt: true) } }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(zustand.laufend.contains("rechte"))
+                        .accessibilityIdentifier("welten-rechte-sichern")
+                }
+                .controlSize(.small)
+            }
+            .accessibilityIdentifier("welten-profil-rechte")
+        } else {
+            let eigene = AgentEntwurf.eigeneMuster(a.bash, dienstweg)
+            let web = a.werkzeuge.filter { WeltenZustand.webWerkzeuge.contains($0) }
+            gruppe("Was der Agent darf") {
+                HStack {
+                    Spacer()
+                    Button("Rechte ändern …") { zustand.rechteEntwurf = WeltenZustand.RechteEntwurf(a, dienstweg: dienstweg) }
+                        .controlSize(.small)
+                        .disabled(!welt.rechteAenderbar)
+                        .help(welt.rechteAenderbar ? "Werkzeuge, Bash-Muster und Skills; gilt ab dem nächsten Zug." : Self.rechteNichtAusgerollt)
+                        .accessibilityIdentifier("welten-rechte-bearbeiten")
+                }
+                feld("Werkzeuge", a.werkzeuge.filter { !WeltenZustand.webWerkzeuge.contains($0) }.joined(separator: ", "), mono: true)
+                feld("Web", web.isEmpty ? (welt.webZugang ? "keins (Zugang vorhanden)" : "keins (die Welt hat keinen Zugang der Art web)") : web.joined(separator: ", "))
+                feld("Bash-Muster", (eigene.isEmpty ? "keine eigenen" : eigene.joined(separator: " · ")) + (a.bash.count > eigene.count ? " + \(a.bash.count - eigene.count) Dienstweg" : ""), mono: !eigene.isEmpty)
+                feld("Skills", a.skills.isEmpty ? "keine eingetragen" : a.skills.joined(separator: ", "))
+                if !welt.rechteAenderbar {
+                    Text(Self.rechteNichtAusgerollt).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                        .accessibilityIdentifier("welten-rechte-grund")
+                }
+            }
+            .accessibilityIdentifier("welten-profil-rechte")
+        }
+    }
+
+    static let rechteNichtAusgerollt = "Ändern ist noch nicht ausgerollt: Die Datenbibliothek kennt „wb-agent rechte“ noch nicht. Bis dahin stehen die Rechte hier nur zum Lesen."
 
     /// Auftrag agentaktiv: was der Traeger ueber den Zug sagt -- jetzt, Art, Grund, naechster Wecker, letzter Zug.
     private func lebenszeichen(_ a: WeltAgent) -> some View {
@@ -2386,12 +2491,23 @@ extension WeltenZustand {
         raus["profilEntwurf"] = profilEntwurf.map { ["agent": $0.agent, "modell": $0.modell, "denkstufe": $0.denkstufe, "fallback": $0.fallback, "fallbackDenkstufe": $0.fallbackDenkstufe, "maschine": $0.maschine, "spezialgebiet": $0.spezialgebiet] } ?? [:]
         raus["antraege"] = w.antraege.map { ["id": $0.id, "von": $0.von, "agent": $0.agent, "stand": $0.stand] }
         raus["vorlagen"] = n.vorlagen.map(\.name)
-        raus["anlegen"] = anlegenAuskunft()
+        raus["anlegen"] = anlegenAuskunft(w)
+        // Auftrag agentsform: gemerkte Projektordner zum Entfernen und die Rechte in Bearbeitung.
+        raus["gemerkteProjekte"] = n.gemerkteProjekte
+        raus["rechteEntwurf"] = rechteEntwurf.map { ["agent": $0.agent, "werkzeuge": $0.werkzeuge, "bash": $0.bash, "skills": $0.skills] as [String: Any] } ?? [:]
+        raus["weltRechte"] = ["modelle": w.modelle.map { $0.map { ["id": $0.id, "verfuegbar": $0.verfuegbar, "grund": $0.grund] as [String: Any] } } as Any? ?? NSNull(),
+                              "maschineVorgabe": w.maschineVorgabe, "webZugang": w.webZugang, "rechteAenderbar": w.rechteAenderbar,
+                              "skillKatalog": w.skillKatalog.map { "\($0.name) (\($0.ebene))" }] as [String: Any]
         raus["gedaechtnisEntwurf"] = gedaechtnisEntwurf.map { ["agent": $0.agent, "zeichen": $0.text.count, "sha": $0.sha] as [String: Any] } ?? [:]
         raus["tickets"] = tickets(w).map { ["id": $0.id, "titel": $0.titel, "stand": $0.stand, "adressaten": $0.adressaten] as [String: Any] }
         raus["inspektorInhalt"] = a.map { agent -> [String: Any] in
             switch blatt {
-            case .profil: return ["modell": agent.modell, "denkstufe": agent.denkstufe, "fallback": agent.fallback, "maschine": agent.maschine, "spezialgebiet": agent.spezialgebiet, "stand": agent.stand, "postfachOffen": agent.postfachOffen,
+            case .profil:
+                let dienstweg = n.dienstweg(agent.stufe)
+                return ["modell": agent.modell, "denkstufe": agent.denkstufe, "fallback": agent.fallback, "maschine": agent.maschine, "spezialgebiet": agent.spezialgebiet, "stand": agent.stand, "postfachOffen": agent.postfachOffen,
+                                  "rechte": ["werkzeuge": agent.werkzeuge, "eigeneBash": AgentEntwurf.eigeneMuster(agent.bash, dienstweg), "dienstweg": agent.bash.count - AgentEntwurf.eigeneMuster(agent.bash, dienstweg).count,
+                                             "skills": agent.skills, "aenderbar": w.rechteAenderbar, "grund": w.rechteAenderbar ? "" : WeltenInspektor.rechteNichtAusgerollt,
+                                             "bearbeiten": rechteEntwurf?.agent == agent.id] as [String: Any],
                                   "lebenszeichen": agent.leben.map { l in ["jetzt": WeltenWorte.leben(agent) ?? (l.stand == "schlaeft" ? "schläft" : WeltenWorte.zustand(agent.zustand)),
                                                                           "art": agent.zug?.laeuft == true ? WeltenWorte.zugArt(agent.zug?.art) : "", "grund": WeltenWorte.grund(l.grund),
                                                                           "wecker": l.wecker ?? "", "ring": agent.ring.rawValue] as [String: Any] } ?? [:]]

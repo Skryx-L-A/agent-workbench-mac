@@ -20,6 +20,14 @@
 // gibt den gemischten Entwurf zurueck (agentengespraech.ts). Was der Mensch im
 // Formular selbst gesetzt hat, gilt vor dem Modell, auch waehrend ein Zug laeuft.
 // „Abbrechen" verwirft den Verlauf im Kern.
+//
+// DIE RECHTE (16.09.2026, Auftrag agentsform; der Nutzer: „Der Hauptagent darf entscheiden, wer welche
+// Berechtigung bekommt, und ich beim Erstellen."). Was ein Agent darf, steht in Formular, Gespraech und
+// Vorschau an einer Stelle: Werkzeuge (Bash fest als Dienstweg), Web nur mit einem Zugang der Art web,
+// eigene Bash-Muster ueber den festen Mustern des Dienstwegs, Skills der Welt und der Bibliothek. Modell
+// und Fallback bieten nur die Modelle an, die der Traeger der Welt fahren kann; die Maschine steht auf
+// seiner Maschine.
+import AppKit
 import SwiftUI
 
 extension WeltenZustand {
@@ -59,6 +67,12 @@ extension WeltenZustand {
         var gespraechFragen: [String] = []
         var gespraechFertig = false
         var gespraechInfo = ""
+        /// Auftrag agentsform: die Dienstwegmuster je Stufe, die Maschinen zur Wahl und ob die Rechte im Gespraech aufgeklappt sind.
+        var bashVorgabe: [String: [String]] = [:]
+        var maschinen: [String] = []
+        var rechteOffen = false
+
+        func dienstweg(_ stufe: String) -> [String] { bashVorgabe[stufe] ?? bashVorgabe["mitglied"] ?? [] }
     }
 
     /// Die Feldnamen des Entwurfs in den Worten des Formulars.
@@ -73,7 +87,9 @@ extension WeltenZustand {
     static let figurArten: [(String, String)] = [("roboter", "Roboter"), ("tier", "Tier"), ("linse", "Linse")]
     static let figurFarben: [(String, String)] = [("entwicklung", "Entwicklung"), ("recherche", "Recherche"), ("pruefung", "Prüfung"), ("gestaltung", "Gestaltung")]
     // WebFetch und WebSearch sind je Agent wählbar (Rechercheagenten, 2026-09-15); die Vorgabe bleibt ohne Web.
-    static let werkzeuge = ["Read", "Grep", "Glob", "Bash", "Write", "Edit", "WebFetch", "WebSearch"]
+    // Auftrag agentsform: Bash gehoert zum Dienstweg und ist immer dabei; Web nur mit einem Zugang der Art web.
+    static let werkzeuge = ["Read", "Write", "Edit", "Glob", "Grep"]
+    static let webWerkzeuge = ["WebFetch", "WebSearch"]
 
     func anlegenOeffnen(_ n: WeltenNutzlast, _ w: Welt, vorlage: String? = nil) {
         var a = AnlegenEntwurf()
@@ -84,8 +100,20 @@ extension WeltenZustand {
         a.entwurf.team = w.teams.first?.name ?? ""
         a.neuesTeam = w.teams.isEmpty
         if w.hauptagent == nil { a.entwurf.stufe = "hauptagent"; a.entwurf.team = "" }
-        // Auftrag fernwelten: ein Agent laeuft, wo seine Welt liegt; die Maschine der Welt ist die Vorgabe.
-        if !w.maschine.isEmpty { a.entwurf.maschine = w.maschine }
+        // Auftrag fernwelten: ein Agent laeuft, wo seine Welt liegt; seit agentsform auf der Traegermaschine der Welt.
+        if !w.agentMaschine.isEmpty { a.entwurf.maschine = w.agentMaschine }
+        a.bashVorgabe = n.bashVorgabe
+        a.maschinen = n.maschinen.map(\.name)
+        // Auftrag agentsform: mit einer Modellliste der Welt gehen die Kennungen woertlich hinaus; die Vorgabe ist die erste verfuegbare.
+        if let ms = w.modelle {
+            a.entwurf.modellGenau = true
+            let voll = AgentEntwurf.mitStufe(a.entwurf.modell, a.entwurf.denkstufe)
+            if let m = ms.first(where: { $0.verfuegbar && $0.id == voll }) ?? ms.first(where: { $0.verfuegbar }) {
+                a.entwurf.modell = m.id
+                let teile = AgentEntwurf.teilen(m.id, "")
+                if !teile.1.isEmpty { a.entwurf.denkstufe = teile.1 }
+            }
+        }
         anlegen = a
         meldung = nil
         inspektorOffen = true
@@ -97,7 +125,13 @@ extension WeltenZustand {
         guard var a = anlegen else { return }
         var e = v.entwurf
         e.id = Self.freieKennung(e.id, w)
-        if !w.maschine.isEmpty { e.maschine = w.maschine }
+        if !w.agentMaschine.isEmpty { e.maschine = w.agentMaschine }
+        if w.modelle != nil {
+            e.modell = AgentEntwurf.mitStufe(e.modell, e.denkstufe)
+            if !e.fallback.isEmpty { e.fallback = AgentEntwurf.mitStufe(e.fallback, e.fallbackDenkstufe) }
+            e.modellGenau = true
+        }
+        e.bash = AgentEntwurf.eigeneMuster(e.bashMuster, a.dienstweg(e.stufe)).joined(separator: "\n")
         e.vorlage = v.name
         a.neuesTeam = !w.teams.contains { $0.name == e.team }
         a.entwurf = e
@@ -160,12 +194,61 @@ extension WeltenZustand {
         return raus
     }
 
-    func werkzeugSetzen(_ name: String, _ an: Bool) {
-        guard var a = anlegen else { return }
+    /// Ein Werkzeug an oder aus; nil, wenn es ging, sonst der Grund. Bash bleibt, Web nur mit Zugang der Art web.
+    @discardableResult
+    func werkzeugSetzen(_ name: String, _ an: Bool, webZugang: Bool, befehl: String = "") -> String? {
+        guard var a = anlegen else { return "Kein Anlege-Menü offen." }
+        if name == "Bash" { return an ? nil : "Bash gehört zum Dienstweg und bleibt dabei." }
+        if Self.webWerkzeuge.contains(name), an, !webZugang { return Self.webOhneZugang(befehl) }
         if an, !a.entwurf.werkzeuge.contains(name) { a.entwurf.werkzeuge.append(name) }
         if !an { a.entwurf.werkzeuge.removeAll { $0 == name } }
+        if !a.entwurf.werkzeuge.contains("Bash") { a.entwurf.werkzeuge.insert("Bash", at: 0) }
         a.gesetzt.insert("werkzeuge")
         anlegen = a
+        return nil
+    }
+
+    /// Der Satz, wie eine Welt Web bekommt.
+    nonisolated static func webOhneZugang(_ befehl: String) -> String {
+        "WebFetch und WebSearch gibt es erst, wenn die Welt einen Zugang der Art web hat. Einrichten: \(befehl)"
+    }
+
+    /// Ein Skill der Welt oder der Bibliothek an oder aus.
+    func skillSetzen(_ name: String, _ an: Bool) {
+        guard var a = anlegen else { return }
+        var liste = a.entwurf.skillListe
+        if an, !liste.contains(name) { liste.append(name) }
+        if !an { liste.removeAll { $0 == name } }
+        a.entwurf.skills = liste.joined(separator: ", ")
+        a.gesetzt.insert("skills")
+        anlegen = a
+    }
+
+    /// Modell oder Fallback: nur ein Modell, das der Traeger der Welt fahren kann; nil, wenn es ging.
+    @discardableResult
+    func anlegenModell(_ feld: String, _ wert: String, _ w: Welt) -> String? {
+        if !wert.isEmpty, let m = w.modelle?.first(where: { $0.id == wert || AgentEntwurf.teilen($0.id, "").0 == wert }), !m.verfuegbar {
+            return "\(wert) ist in \(w.name) nicht verfügbar: \(WeltenWorte.modellGrund(m.grund))"
+        }
+        guard anlegenFeld(feld, wert) else { return "Kein Anlege-Menü offen." }
+        // Eine Kennung der Welt mit Suffix bringt ihre Denkstufe mit.
+        let stufe = AgentEntwurf.teilen(wert, "").1
+        if anlegen?.entwurf.modellGenau == true, !stufe.isEmpty, WeltenWorte.denkstufen.contains(stufe) {
+            _ = anlegenFeld(feld == "modell" ? "denkstufe" : "fallback-denkstufe", stufe)
+        }
+        return nil
+    }
+
+    func anlegenRechteOffen(_ offen: Bool) {
+        guard var a = anlegen else { return }
+        a.rechteOffen = offen
+        anlegen = a
+    }
+
+    /// Die Rechte in einer Zeile: fuer den zugeklappten Stand im Gespraech und die Auskunft.
+    nonisolated static func rechteKurz(werkzeuge: [String], eigeneBash: Int, dienstweg: Int, skills: [String]) -> String {
+        let wz = ["Bash"] + werkzeuge.filter { $0 != "Bash" }
+        return "Darf: \(wz.joined(separator: ", ")) · Bash \(eigeneBash) eigene + \(dienstweg) Dienstweg · Skills: \(skills.isEmpty ? "–" : skills.joined(separator: ", "))"
     }
 
     /// Eine Handlung, deren Antwort Daten traegt (Vorschlag, Pruefung).
@@ -203,7 +286,8 @@ extension WeltenZustand {
         }
         if let e = j["entwurf"] as? [String: Any] {
             let gesetzt = neu.gesetzt
-            neu.entwurf = AgentEntwurf(e)
+            neu.entwurf = AgentEntwurf(e, genau: neu.entwurf.modellGenau)
+            neu.entwurf.bash = AgentEntwurf.eigeneMuster(neu.entwurf.bashMuster, neu.dienstweg(neu.entwurf.stufe)).joined(separator: "\n")
             neu.gesetzt = gesetzt
             if let text = j["anweisungen"] as? String, !text.isEmpty { neu.entwurf.anweisungen = text }
             neu.neuesTeam = !neu.entwurf.team.isEmpty && !w.teams.contains { $0.name == neu.entwurf.team }
@@ -272,7 +356,8 @@ extension WeltenZustand {
         if var e = j["entwurf"] as? [String: Any] {
             // Was der Mensch waehrend des Zuges im Formular gesetzt hat, bleibt stehen.
             for (k, v) in vorschlagVorgaben() { e[k] = v }
-            neu.entwurf = AgentEntwurf(e)
+            neu.entwurf = AgentEntwurf(e, genau: neu.entwurf.modellGenau)
+            neu.entwurf.bash = AgentEntwurf.eigeneMuster(neu.entwurf.bashMuster, neu.dienstweg(neu.entwurf.stufe)).joined(separator: "\n")
             neu.neuesTeam = !neu.entwurf.team.isEmpty && !w.teams.contains { $0.name == neu.entwurf.team }
         }
         let verlauf = (j["verlauf"] as? [[String: Any]]) ?? []
@@ -300,9 +385,22 @@ extension WeltenZustand {
     }
 
     /// Was die Auskunft ueber das offene Menue traegt (`ui.agents.anlegen`, `welten.anlegen`).
-    func anlegenAuskunft() -> [String: Any] {
+    func anlegenAuskunft(_ w: Welt? = nil) -> [String: Any] {
         guard let a = anlegen else { return [:] }
-        return ["entwurf": a.entwurf.json(), "beschreibung": a.beschreibung, "vorschlagModell": a.vorschlagModell, "neuesTeam": a.neuesTeam,
+        let e = a.entwurf
+        let dienstweg = a.dienstweg(e.stufe)
+        var rechte: [String: Any] = ["werkzeuge": e.werkzeuge, "eigeneBash": e.bashMuster, "dienstweg": dienstweg, "skills": e.skillListe, "offen": a.rechteOffen,
+                                     "kurz": Self.rechteKurz(werkzeuge: e.werkzeuge, eigeneBash: e.bashMuster.count, dienstweg: dienstweg.count, skills: e.skillListe)]
+        if let w {
+            rechte["webZugang"] = w.webZugang
+            rechte["webSatz"] = w.webZugang ? "" : Self.webOhneZugang(w.webZugangBefehl)
+            rechte["skillKatalog"] = w.skillKatalog.map { "\($0.name) (\($0.ebene))" }
+            rechte["modellOptionen"] = WeltenNutzlast.modellOptionen(w, registry: a.modelle, eigene: [e.modell, e.fallback])
+                .map { ["wert": $0.wert, "titel": $0.titel, "verfuegbar": $0.verfuegbar] as [String: Any] }
+            rechte["maschinen"] = Self.maschinenWahl(a, w).map(\.wert)
+            rechte["maschineVorgabe"] = w.agentMaschine
+        }
+        return ["rechte": rechte,"entwurf": a.entwurf.json(), "beschreibung": a.beschreibung, "vorschlagModell": a.vorschlagModell, "neuesTeam": a.neuesTeam,
                 "gesetzt": a.gesetzt.sorted(), "vorgaben": vorschlagVorgaben(), "pruefung": a.pruefung, "vorschlagInfo": a.vorschlagInfo,
                 "modelle": a.modelle.count, "entwurfModelle": a.entwurfModelle, "ansicht": a.ansicht.rawValue,
                 "vorschau": { let k = WeltenAnlegenVorschau.kopf(a.entwurf)
@@ -312,6 +410,13 @@ extension WeltenZustand {
                               "eingabe": a.gespraechEingabe, "felder": a.gespraechFelder, "fragen": a.gespraechFragen,
                               "fertig": a.gespraechFertig, "info": a.gespraechInfo, "laeuft": laufend.contains("gespraech"),
                               "hinweis": Self.gespraechHinweis(a)] as [String: Any]]
+    }
+
+    /// Die Maschinen zur Wahl: die Traegermaschine der Welt zuerst, dann der Wert des Entwurfs und die bekannten Maschinen.
+    nonisolated static func maschinenWahl(_ a: AnlegenEntwurf, _ w: Welt) -> [(wert: String, titel: String)] {
+        var gesehen = Set<String>()
+        return ([w.agentMaschine, a.entwurf.maschine] + a.maschinen).filter { !$0.isEmpty && gesehen.insert($0).inserted }
+            .map { ($0, $0 == w.agentMaschine ? "\(WeltenWorte.maschine($0)) (\(w.traegerEingerichtet ? "Träger der Welt" : "Vorgabe der Welt"))" : WeltenWorte.maschine($0)) }
     }
 
     /// Der Hinweis unter dem Verlauf: was der letzte Zug gesetzt hat.
@@ -366,8 +471,8 @@ struct WeltenAnlegen: View {
                 Form {
                     vorschlag
                     agent
+                    rechte
                     modell
-                    werkzeuge
                     figur
                     anweisungen
                 }
@@ -452,67 +557,66 @@ struct WeltenAnlegen: View {
         }
     }
 
-    private var modellBasen: [(String, String)] {
-        var gesehen = Set<String>()
-        var raus: [(String, String)] = []
-        for m in a.modelle {
-            let basis = AgentEntwurf.teilen(m.kennung, "").0
-            if gesehen.insert(basis).inserted { raus.append((basis, "\(basis) · \(m.harness)")) }
-        }
-        for eigen in [a.entwurf.modell, a.entwurf.fallback] where !eigen.isEmpty && gesehen.insert(eigen).inserted { raus.append((eigen, eigen)) }
-        return raus
+    /// Ein Modell setzen; ein nicht verfuegbares lehnt der Zustand mit Grund ab.
+    private func modellFeld(_ name: String, _ weg: WritableKeyPath<AgentEntwurf, String>) -> Binding<String> {
+        Binding(get: { a.entwurf[keyPath: weg] }, set: { wert in
+            if let f = zustand.anlegenModell(name, wert, welt) { zustand.meldung = WeltenZustand.Meldung(text: f, ok: false) }
+        })
     }
 
     private var modell: some View {
-        Section {
-            Picker("Modell", selection: feld("modell", \.modell)) {
-                ForEach(modellBasen, id: \.0) { Text($0.1).tag($0.0) }
+        let optionen = WeltenNutzlast.modellOptionen(welt, registry: a.modelle, eigene: [a.entwurf.modell, a.entwurf.fallback])
+        return Section {
+            Picker("Modell", selection: modellFeld("modell", \.modell)) {
+                ForEach(optionen, id: \.wert) { Text($0.titel).tag($0.wert).disabled(!$0.verfuegbar) }
             }
+            .accessibilityIdentifier("welten-anlegen-modell")
             Picker("Denkstufe", selection: feld("denkstufe", \.denkstufe)) {
                 ForEach(WeltenWorte.denkstufen, id: \.self) { Text($0).tag($0) }
             }
-            Picker("Fallback", selection: feld("fallback", \.fallback)) {
+            Picker("Fallback", selection: modellFeld("fallback", \.fallback)) {
                 Text("keiner").tag("")
-                ForEach(modellBasen, id: \.0) { Text($0.1).tag($0.0) }
+                ForEach(optionen, id: \.wert) { Text($0.titel).tag($0.wert).disabled(!$0.verfuegbar) }
             }
+            .accessibilityIdentifier("welten-anlegen-fallback")
             if !a.entwurf.fallback.isEmpty {
                 Picker("Fallback-Denkstufe", selection: feld("fallback-denkstufe", \.fallbackDenkstufe)) {
                     ForEach(WeltenWorte.denkstufen, id: \.self) { Text($0).tag($0) }
                 }
             }
-            TextField("Maschine", text: feld("maschine", \.maschine), prompt: Text("peer"))
+            Picker("Maschine", selection: feld("maschine", \.maschine)) {
+                ForEach(WeltenZustand.maschinenWahl(a, welt), id: \.wert) { Text($0.titel).tag($0.wert) }
+            }
+            .accessibilityIdentifier("welten-anlegen-maschine")
         } header: {
             Text("Modell und Maschine")
         } footer: {
-            Text("Aus wb-state models table, Fable nie. Lokal, wo es reicht; der Mac nur, wenn die Arbeit dort sein muss.").font(.caption).foregroundStyle(.secondary)
+            Text(welt.modelle == nil
+                 ? "Aus wb-state models table, Fable nie. Die Maschine steht auf der Maschine der Welt."
+                 : "Nur die Modelle, die der Träger dieser Welt fahren kann; nicht verfügbare stehen mit Grund da. Fable nie.")
+                .font(.caption).foregroundStyle(.secondary)
         }
     }
 
-    private var werkzeuge: some View {
+    /// Auftrag agentsform: was der Agent darf, in einem Blick -- gleich nach Name, Stufe und Team.
+    private var rechte: some View {
         Section {
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 90), alignment: .leading)], alignment: .leading, spacing: 6) {
-                ForEach(WeltenZustand.werkzeuge, id: \.self) { w in
-                    Toggle(w, isOn: Binding(get: { a.entwurf.werkzeuge.contains(w) }, set: { zustand.werkzeugSetzen(w, $0) }))
-                        .toggleStyle(.checkbox)
-                }
-            }
-            if a.entwurf.werkzeuge.contains("Bash") {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Bash-Muster, eins je Zeile").font(.callout)
-                    TextEditor(text: feld("bash", \.bash))
-                        .font(.callout.monospaced())
-                        .frame(minHeight: 54)
-                        .scrollContentBackground(.hidden)
-                        .background(RoundedRectangle(cornerRadius: 6).fill(Color(nsColor: .controlBackgroundColor)))
-                }
-            }
-            TextField("Skills, durch Komma getrennt", text: feld("skills", \.skills))
+            WeltenRechteAuswahl(
+                welt: welt, werkzeuge: a.entwurf.werkzeuge, skills: a.entwurf.skillListe, dienstweg: a.dienstweg(a.entwurf.stufe),
+                bash: feld("bash", \.bash),
+                werkzeug: { name, an in
+                    if let f = zustand.werkzeugSetzen(name, an, webZugang: welt.webZugang, befehl: welt.webZugangBefehl) {
+                        zustand.meldung = WeltenZustand.Meldung(text: f, ok: false)
+                    }
+                },
+                skill: { zustand.skillSetzen($0, $1) })
             mehrzeilig("Kontextgrenze", "Was der Agent nicht erfährt", feld("kontextgrenze", \.kontextgrenze), kennung: "welten-anlegen-kontextgrenze")
         } header: {
-            Text("Werkzeuge und Grenzen")
+            Text("Was der Agent darf")
         } footer: {
-            Text("Gesperrt bleiben, was die Hausliste sperrt: Push, rm -rf, kill, Mail-Versand, Erlaubnisstufen.").font(.caption).foregroundStyle(.secondary)
+            Text("Gesperrt bleibt, was die Hausliste sperrt: Push, rm -rf, kill, Mail-Versand, Erlaubnisstufen.").font(.caption).foregroundStyle(.secondary)
         }
+        .accessibilityIdentifier("welten-anlegen-rechte")
     }
 
     private var figur: some View {
@@ -607,6 +711,7 @@ struct WeltenAnlegenGespraech: View {
             }
             .accessibilityIdentifier("welten-anlegen-gespraech")
             Divider()
+            rechteKarte
             hinweise
             eingabe
         }
@@ -628,6 +733,50 @@ struct WeltenAnlegenGespraech: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color(nsColor: .controlBackgroundColor)))
         .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(Color(nsColor: .separatorColor)))
+    }
+
+    /// Auftrag agentsform: auch im Gespraech steht, was der Agent darf; aufgeklappt laesst es sich hier setzen.
+    private var rechteKarte: some View {
+        let e = a.entwurf
+        let dienstweg = a.dienstweg(e.stufe)
+        let kurz = WeltenZustand.rechteKurz(werkzeuge: e.werkzeuge, eigeneBash: e.bashMuster.count, dienstweg: dienstweg.count, skills: e.skillListe)
+        let modell = [e.modellText, e.fallback.isEmpty ? "" : "Fallback \(e.fallbackText)", WeltenWorte.maschine(e.maschine)]
+            .filter { !$0.isEmpty }.joined(separator: " · ")
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text("Was der Agent darf").font(.callout.weight(.semibold))
+                Text("\(kurz) · \(modell)").font(.callout).foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
+                    .help("\(kurz)\n\(modell)")
+                Spacer(minLength: 6)
+                Button(a.rechteOffen ? "Zuklappen" : "Ändern") { zustand.anlegenRechteOffen(!a.rechteOffen) }
+                    .buttonStyle(.borderless).controlSize(.small)
+                    .accessibilityIdentifier("welten-anlegen-gespraech-rechte-knopf")
+            }
+            if a.rechteOffen {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 12) {
+                        WeltenRechteAuswahl(
+                            welt: welt, werkzeuge: e.werkzeuge, skills: e.skillListe, dienstweg: dienstweg,
+                            bash: Binding(get: { a.entwurf.bash }, set: { _ = zustand.anlegenFeld("bash", $0) }),
+                            werkzeug: { name, an in
+                                if let f = zustand.werkzeugSetzen(name, an, webZugang: welt.webZugang, befehl: welt.webZugangBefehl) {
+                                    zustand.meldung = WeltenZustand.Meldung(text: f, ok: false)
+                                }
+                            },
+                            skill: { zustand.skillSetzen($0, $1) })
+                        WeltenAnlegenModellWahl(welt: welt, zustand: zustand)
+                    }
+                    .padding(.vertical, 4)
+                }
+                .frame(maxHeight: 320)
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color(nsColor: .controlBackgroundColor)))
+        .padding(.horizontal, 14).padding(.top, 8)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("welten-anlegen-gespraech-rechte")
     }
 
     @ViewBuilder private var hinweise: some View {
@@ -729,13 +878,21 @@ struct WeltenAnlegenVorschau: View {
                             Text(k.modell).font(.callout.monospaced()).foregroundStyle(.secondary)
                         }
                     }
+                    zeile("Spezialgebiet", e.spezialgebiet)
+                    // Auftrag agentsform: was der Agent darf, auf einer Karte.
                     VStack(alignment: .leading, spacing: 6) {
-                        zeile("Spezialgebiet", e.spezialgebiet)
-                        zeile("Werkzeuge", e.werkzeuge.joined(separator: ", "))
-                        if e.werkzeuge.contains("Bash") { zeile("Bash", e.bash.split(separator: "\n").joined(separator: " · ")) }
+                        Text("Darf").font(.callout.weight(.semibold)).foregroundStyle(.secondary)
+                        zeile("Werkzeuge", (["Bash"] + e.werkzeuge.filter { $0 != "Bash" }).joined(separator: ", "))
+                        zeile("Bash-Muster", (e.bashMuster.isEmpty ? "keine eigenen" : e.bashMuster.joined(separator: " · ")) + " + \(anlegen.dienstweg(e.stufe).count) Dienstweg")
+                        zeile("Skills", e.skillListe.joined(separator: ", "))
+                        zeile("Modell", [e.modellText + (e.modellGenau ? " · \(e.denkstufe)" : ""), e.fallback.isEmpty ? "" : "Fallback \(e.fallbackText)"].filter { !$0.isEmpty }.joined(separator: " · "))
                         zeile("Maschine", WeltenWorte.maschine(e.maschine))
                         if !e.kontextgrenze.isEmpty { zeile("Kontextgrenze", e.kontextgrenze) }
                     }
+                    .padding(10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color(nsColor: .controlBackgroundColor)))
+                    .accessibilityIdentifier("welten-anlegen-vorschau-darf")
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Anweisungsdatei").font(.callout.weight(.semibold)).foregroundStyle(.secondary)
                         Text(e.anweisungen.isEmpty ? "Entsteht beim Anlegen aus der Hausvorlage." : e.anweisungen)
@@ -755,7 +912,7 @@ struct WeltenAnlegenVorschau: View {
     nonisolated static func kopf(_ e: AgentEntwurf) -> (name: String, stufe: String, modell: String) {
         (e.id.isEmpty ? "ohne Namen" : e.id,
          WeltenWorte.stufe(e.stufe) + (e.team.isEmpty || e.stufe == "hauptagent" ? "" : " · Team \(WeltenWorte.team(e.team))"),
-         AgentEntwurf.mitStufe(e.modell, e.denkstufe))
+         e.modellText)
     }
 
     @ViewBuilder private var figur: some View {
@@ -772,5 +929,181 @@ struct WeltenAnlegenVorschau: View {
             Text(name).font(.caption).foregroundStyle(.secondary)
             Text(wert.isEmpty ? "–" : wert).font(.callout).fixedSize(horizontal: false, vertical: true)
         }
+    }
+}
+
+// MARK: Was ein Agent darf (Auftrag agentsform)
+
+/// Die Rechte eines Agenten zum Setzen: im Formular, im Gespraech und im Profil dieselben Teile.
+/// Werkzeuge mit Bash fest als Dienstweg, Web nur mit einem Zugang der Art web (sonst der Befehl dazu),
+/// eigene Bash-Muster ueber den festen Mustern des Dienstwegs, Skills der Welt und der Bibliothek.
+struct WeltenRechteAuswahl: View {
+    let welt: Welt
+    let werkzeuge: [String]
+    let skills: [String]
+    let dienstweg: [String]
+    @Binding var bash: String
+    let werkzeug: (String, Bool) -> Void
+    let skill: (String, Bool) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            teil("Werkzeuge") {
+                FlussLayout(abstand: 12) {
+                    Toggle("Bash (Dienstweg)", isOn: .constant(true))
+                        .disabled(true)
+                        .help("Ohne Bash kann der Agent weder antworten noch Ergebnisse abgeben; es ist immer dabei.")
+                    ForEach(WeltenZustand.werkzeuge, id: \.self) { w in
+                        Toggle(w, isOn: Binding(get: { werkzeuge.contains(w) }, set: { werkzeug(w, $0) }))
+                    }
+                }
+                .toggleStyle(.checkbox)
+            }
+            teil("Web") {
+                if welt.webZugang {
+                    FlussLayout(abstand: 12) {
+                        ForEach(WeltenZustand.webWerkzeuge, id: \.self) { w in
+                            Toggle(w, isOn: Binding(get: { werkzeuge.contains(w) }, set: { werkzeug(w, $0) }))
+                        }
+                    }
+                    .toggleStyle(.checkbox)
+                } else {
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text("WebFetch und WebSearch gibt es erst, wenn die Welt einen Zugang der Art web hat. Einrichten:")
+                            .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                        HStack(alignment: .firstTextBaseline, spacing: 6) {
+                            Text(welt.webZugangBefehl).font(.caption.monospaced()).textSelection(.enabled)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .padding(.horizontal, 7).padding(.vertical, 4)
+                                .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(Color(nsColor: .textBackgroundColor)))
+                            Button("Kopieren") {
+                                NSPasteboard.general.clearContents()
+                                NSPasteboard.general.setString(welt.webZugangBefehl, forType: .string)
+                            }
+                            .buttonStyle(.borderless).controlSize(.small)
+                        }
+                    }
+                    .accessibilityIdentifier("welten-rechte-web-satz")
+                }
+            }
+            teil("Bash-Muster") {
+                VStack(alignment: .leading, spacing: 6) {
+                    TextEditor(text: $bash)
+                        .font(.callout.monospaced())
+                        .frame(minHeight: 44)
+                        .scrollContentBackground(.hidden)
+                        .padding(4)
+                        .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(Color(nsColor: .textBackgroundColor)))
+                        .accessibilityLabel("Eigene Bash-Muster, eins je Zeile")
+                        .accessibilityIdentifier("welten-rechte-bash")
+                    if dienstweg.isEmpty {
+                        Text("Eigene Muster, eins je Zeile. Die Muster des Dienstwegs ergänzt die Bibliothek beim Anlegen.").font(.caption).foregroundStyle(.secondary)
+                    } else {
+                        DisclosureGroup {
+                            VStack(alignment: .leading, spacing: 2) {
+                                ForEach(dienstweg, id: \.self) { m in
+                                    Label(m, systemImage: "lock").font(.caption.monospaced()).foregroundStyle(.secondary).textSelection(.enabled)
+                                }
+                            }
+                            .padding(.top, 2)
+                        } label: {
+                            Text("Eigene Muster, eins je Zeile. Immer dabei: \(dienstweg.count) Muster des Dienstwegs").font(.caption).foregroundStyle(.secondary)
+                        }
+                        .accessibilityIdentifier("welten-rechte-dienstweg")
+                    }
+                }
+            }
+            teil("Skills") {
+                let fremd = skills.filter { s in !welt.skillKatalog.contains { $0.name == s } }
+                if welt.skillKatalog.isEmpty, fremd.isEmpty {
+                    Text("Die Welt und die Bibliothek haben noch keine Skills.").font(.callout).foregroundStyle(.secondary)
+                } else {
+                    FlussLayout(abstand: 12) {
+                        ForEach(welt.skillKatalog) { k in
+                            Toggle(isOn: Binding(get: { skills.contains(k.name) }, set: { skill(k.name, $0) })) {
+                                Text(k.name) + Text(k.ebene == "welt" ? " · Welt" : " · Bibliothek").foregroundStyle(.secondary)
+                            }
+                            .help(k.beschreibung)
+                        }
+                        ForEach(fremd, id: \.self) { name in
+                            Toggle(isOn: Binding(get: { true }, set: { skill(name, $0) })) {
+                                Text(name) + Text(" · nicht gefunden").foregroundStyle(.orange)
+                            }
+                        }
+                    }
+                    .toggleStyle(.checkbox)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func teil<Inhalt: View>(_ titel: String, @ViewBuilder _ inhalt: () -> Inhalt) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(titel).font(.callout.weight(.medium)).foregroundStyle(.secondary).accessibilityAddTraits(.isHeader)
+            inhalt()
+        }
+    }
+}
+
+/// Modell, Denkstufe, Fallback und Maschine ausserhalb des Formulars (Gespraech): dieselben Regeln wie dort.
+struct WeltenAnlegenModellWahl: View {
+    let welt: Welt
+    @Bindable var zustand: WeltenZustand
+
+    private var a: WeltenZustand.AnlegenEntwurf { zustand.anlegen ?? WeltenZustand.AnlegenEntwurf() }
+
+    private func modell(_ name: String, _ weg: WritableKeyPath<AgentEntwurf, String>) -> Binding<String> {
+        Binding(get: { a.entwurf[keyPath: weg] }, set: { wert in
+            if let f = zustand.anlegenModell(name, wert, welt) { zustand.meldung = WeltenZustand.Meldung(text: f, ok: false) }
+        })
+    }
+
+    private func feld(_ name: String, _ weg: WritableKeyPath<AgentEntwurf, String>) -> Binding<String> {
+        Binding(get: { a.entwurf[keyPath: weg] }, set: { _ = zustand.anlegenFeld(name, $0) })
+    }
+
+    var body: some View {
+        let optionen = WeltenNutzlast.modellOptionen(welt, registry: a.modelle, eigene: [a.entwurf.modell, a.entwurf.fallback])
+        Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 10, verticalSpacing: 6) {
+            GridRow {
+                Text("Modell").foregroundStyle(.secondary)
+                HStack {
+                    Picker("Modell", selection: modell("modell", \.modell)) {
+                        ForEach(optionen, id: \.wert) { Text($0.titel).tag($0.wert).disabled(!$0.verfuegbar) }
+                    }
+                    .labelsHidden().fixedSize()
+                    Picker("Denkstufe", selection: feld("denkstufe", \.denkstufe)) {
+                        ForEach(WeltenWorte.denkstufen, id: \.self) { Text($0).tag($0) }
+                    }
+                    .labelsHidden().fixedSize()
+                }
+            }
+            GridRow {
+                Text("Fallback").foregroundStyle(.secondary)
+                HStack {
+                    Picker("Fallback", selection: modell("fallback", \.fallback)) {
+                        Text("keiner").tag("")
+                        ForEach(optionen, id: \.wert) { Text($0.titel).tag($0.wert).disabled(!$0.verfuegbar) }
+                    }
+                    .labelsHidden().fixedSize()
+                    if !a.entwurf.fallback.isEmpty {
+                        Picker("Fallback-Denkstufe", selection: feld("fallback-denkstufe", \.fallbackDenkstufe)) {
+                            ForEach(WeltenWorte.denkstufen, id: \.self) { Text($0).tag($0) }
+                        }
+                        .labelsHidden().fixedSize()
+                    }
+                }
+            }
+            GridRow {
+                Text("Maschine").foregroundStyle(.secondary)
+                Picker("Maschine", selection: feld("maschine", \.maschine)) {
+                    ForEach(WeltenZustand.maschinenWahl(a, welt), id: \.wert) { Text($0.titel).tag($0.wert) }
+                }
+                .labelsHidden().fixedSize()
+            }
+        }
+        .font(.callout)
+        .controlSize(.small)
     }
 }

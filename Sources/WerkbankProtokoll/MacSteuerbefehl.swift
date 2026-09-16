@@ -119,11 +119,18 @@
 //          senden|antworten|zuruecknehmen|pause|stoppen|bestaetigen|abbrechen|ticket|ticketfilter|
 //          ticket-neu|inspektor|fenster|erscheinung|quittieren|rueckgabe|zurueckgeben|profil|
 //          profil-feld|gedaechtnis|gedaechtnis-text|skill-abnehmen|skill-ablehnen|skill-zeigen|
-//          anlegen|anlegen-feld|welt-neu|welt-neu-auf|maschinen|umziehen","wert":"…","arg":"…"}
+//          anlegen|anlegen-feld|rechte|rechte-feld|welt-neu|welt-neu-auf|maschinen|umziehen|vergessen",
+//          "wert":"…","arg":"…"}
 //        `anlegen` kennt oeffnen|abbrechen|vorlage|vorschlag|pruefen|hausvorlage|sichern|
 //          ansicht gespraech|formular|gespraech <text> [modell] [trocken]|vorschlagen (Anlege-Menue,
-//          agentschat 15.09.2026); `anlegen-feld` setzt ein Formularfeld, `welt-neu-auf` legt eine Welt
-//          auf einer Agent-Maschine an, `umziehen` bringt sie dorthin (fernwelten 15.09.2026).
+//          agentschat 15.09.2026) und rechte auf|zu (die Karte „Was der Agent darf" im Gespraech);
+//          `anlegen-feld` setzt ein Formularfeld, dazu werkzeug <Name> an|aus und skill <name> an|aus
+//          (Bash bleibt, Web nur mit Zugang, Modell und Fallback nur verfuegbare der Welt);
+//          `rechte` kennt bearbeiten|abbrechen|sichern, `rechte-feld` werkzeug|skill <name> an|aus und
+//          bash <muster\nmuster> (Rechte eines Agenten im Profil, `wb-agent rechte`); `vergessen <ordner>`
+//          nimmt einen gemerkten Projektordner aus der Liste, nach `bestaetigen` (agentsform 16.09.2026);
+//          `welt-neu-auf` legt eine Welt auf einer Agent-Maschine an, `umziehen` bringt sie dorthin
+//          (fernwelten 15.09.2026).
 //   {"cmd":"figuren-schuss","pfad":"/…/bild.png","dunkel":"1"}      Belegbild des Vorschau-Blatts
 //   {"cmd":"quit"}                        sauber beenden
 import Foundation

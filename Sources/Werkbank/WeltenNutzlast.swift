@@ -343,20 +343,40 @@ struct AgentEntwurf: Equatable, Sendable {
     var bash = "", skills = "", kontextgrenze = ""
     var figurArt = "roboter", figurFarbe = "entwicklung"
     var anweisungen = "", vorlage = ""
+    /// Auftrag agentsform: Modell und Fallback sind Kennungen aus der Modellliste der Welt und gehen woertlich
+    /// hinaus (`sonnet5:high`, `haiku`); der Traeger sucht genau diesen Namen. Sonst Basis plus Denkstufe als Suffix.
+    var modellGenau = false
 
     init() {}
 
-    init(_ j: [String: Any]) {
+    init(_ j: [String: Any], genau: Bool = false) {
         id = text(j, "id"); stufe = text(j, "stage").isEmpty ? "mitglied" : text(j, "stage"); team = text(j, "team")
         spezialgebiet = text(j, "specialty"); maschine = text(j, "machine")
         (modell, denkstufe) = Self.teilen(text(j, "model"), text(j, "effort"))
         (fallback, fallbackDenkstufe) = Self.teilen(text(j, "fallback_model"), text(j, "fallback_effort"))
+        if genau {
+            modellGenau = true
+            if !text(j, "model").isEmpty { modell = text(j, "model") }
+            fallback = text(j, "fallback_model")
+        }
         werkzeuge = texte(j, "tools"); bash = texte(j, "bash").joined(separator: "\n"); skills = texte(j, "skills").joined(separator: ", ")
         kontextgrenze = text(j, "context_limit")
         let f = objekt(j, "figure"); figurArt = text(f, "family").isEmpty ? "roboter" : text(f, "family")
         figurFarbe = text(f, "color").isEmpty ? "entwicklung" : text(f, "color")
         anweisungen = text(j, "instructions"); vorlage = text(j, "template")
     }
+
+    /// Auftrag agentsform: die eigenen Bash-Muster ohne die Dienstwegmuster, die die Bibliothek ohnehin dazugibt.
+    static func eigeneMuster(_ muster: [String], _ dienstweg: [String]) -> [String] {
+        muster.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty && !dienstweg.contains($0) }
+    }
+
+    /// Was als `model` und `fallback_model` hinausgeht.
+    var modellText: String { modellGenau ? modell : Self.mitStufe(modell, denkstufe) }
+    var fallbackText: String { fallback.isEmpty ? "" : (modellGenau ? fallback : Self.mitStufe(fallback, fallbackDenkstufe)) }
+
+    var bashMuster: [String] { bash.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty } }
+    var skillListe: [String] { skills.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty } }
 
     /// `sonnet5:high` -> (`sonnet5`, `high`); eine ausdrueckliche Stufe gilt vor dem Suffix.
     static func teilen(_ modell: String, _ stufe: String) -> (String, String) {
@@ -379,8 +399,8 @@ struct AgentEntwurf: Equatable, Sendable {
         setze("machine", maschine); setze("context_limit", kontextgrenze); setze("template", vorlage)
         if !nurGesetzt {
             setze("stage", stufe)
-            setze("model", Self.mitStufe(modell, denkstufe)); setze("effort", denkstufe)
-            setze("fallback_model", Self.mitStufe(fallback, fallbackDenkstufe)); if !fallback.isEmpty { setze("fallback_effort", fallbackDenkstufe) }
+            setze("model", modellText); setze("effort", denkstufe)
+            setze("fallback_model", fallbackText); if !fallback.isEmpty { setze("fallback_effort", fallbackDenkstufe) }
             j["tools"] = werkzeuge
             j["figure"] = ["family": figurArt, "color": figurFarbe]
         }
@@ -402,6 +422,18 @@ struct WeltVorlage: Equatable, Identifiable, Sendable {
 struct ModellZeile: Equatable, Identifiable, Sendable {
     let kennung, harness, aufgabe: String
     var id: String { kennung }
+}
+
+/// Auftrag agentsform: ein Modell, das der Traeger einer Welt fahren kann (`wb-welt ansicht`, Feld `modelle`).
+struct WeltModell: Equatable, Identifiable, Sendable {
+    let id, harness, grund: String
+    let verfuegbar: Bool
+}
+
+/// Ein Skill der Welt oder der Bibliothek zur Auswahl beim Anlegen (`agents_skills_ansicht.py`, `katalog`).
+struct WeltSkillAuswahl: Equatable, Identifiable, Sendable {
+    let name, beschreibung, ebene: String
+    var id: String { "\(ebene):\(name)" }
 }
 
 struct WeltTeam: Equatable, Identifiable, Sendable {
@@ -457,6 +489,16 @@ struct Welt: Equatable, Identifiable, Sendable {
     let zugaenge: [String]
     /// Auftrag agentaktiv: warum das Lebenszeichen nicht lesbar war; leer, wenn es lesbar war oder kein Traeger da ist.
     let traegerZugFehler: String
+    /// Auftrag agentsform: die Modelle des Traegers dieser Welt; nil, solange der Kern das Feld nicht liefert (dann gilt die Registry).
+    let modelle: [WeltModell]?
+    /// Die Maschine eines neuen Agenten (Traegermaschine der Welt); leer, solange die Ansicht sie nicht nennt.
+    let maschineVorgabe: String
+    /// Die Skills der Welt und der Bibliothek zur Auswahl beim Anlegen.
+    let skillKatalog: [WeltSkillAuswahl]
+    /// Ob die Welt einen Zugang der Art `web` hat: nur dann gibt es WebFetch und WebSearch.
+    let webZugang: Bool
+    /// Ob die Bibliothek auf der Maschine der Welt `wb-agent rechte` kennt; sonst stehen die Rechte im Profil nur zum Lesen.
+    let rechteAenderbar: Bool
 
     static func == (a: Welt, b: Welt) -> Bool {
         a.pfad == b.pfad && a.name == b.name && a.stand == b.stand && a.gelesen == b.gelesen && a.agenten == b.agenten
@@ -469,6 +511,8 @@ struct Welt: Equatable, Identifiable, Sendable {
             && a.traegerEingerichtet == b.traegerEingerichtet && a.traegerLaeuft == b.traegerLaeuft && a.traegerMoeglich == b.traegerMoeglich
             && a.zugaenge == b.zugaenge
             && a.traegerZugFehler == b.traegerZugFehler
+            && a.modelle == b.modelle && a.maschineVorgabe == b.maschineVorgabe && a.skillKatalog == b.skillKatalog
+            && a.webZugang == b.webZugang && a.rechteAenderbar == b.rechteAenderbar
     }
 
     init(_ j: [String: Any]) {
@@ -507,7 +551,25 @@ struct Welt: Equatable, Identifiable, Sendable {
         traegerMoeglich = t["moeglich"] as? Bool ?? false
         zugaenge = Werkbank.liste(j, "zugaenge").compactMap { z in text(z, "name").isEmpty ? nil : "\(text(z, "name")) (\(text(z, "art").isEmpty ? "ssh" : text(z, "art")))" }
         traegerZugFehler = text(t, "zug_fehler")
+        modelle = (j["modelle"] as? [[String: Any]]).map { liste in
+            liste.map { WeltModell(id: Werkbank.text($0, "id"), harness: Werkbank.text($0, "harness"), grund: Werkbank.text($0, "grund"),
+                                   verfuegbar: $0["verfuegbar"] as? Bool ?? false) }
+                .filter { !$0.id.isEmpty && !$0.id.lowercased().contains("fable") }
+        }
+        maschineVorgabe = text(j, "maschine_vorgabe")
+        let k = objekt(j, "skill_katalog")
+        skillKatalog = ["welt", "bibliothek"].flatMap { ebene in
+            Werkbank.liste(k, ebene).map { WeltSkillAuswahl(name: Werkbank.text($0, "name"), beschreibung: Werkbank.text($0, "beschreibung"), ebene: ebene) }
+        }.filter { !$0.name.isEmpty }
+        webZugang = j["web_zugang"] as? Bool ?? false
+        rechteAenderbar = j["rechte_aenderbar"] as? Bool ?? false
     }
+
+    /// Die Maschine eines neuen Agenten: die Traegermaschine, sonst die Maschine der Ablage.
+    var agentMaschine: String { maschineVorgabe.isEmpty ? maschine : maschineVorgabe }
+
+    /// Der Befehl, mit dem der Mensch der Welt einen Zugang der Art web gibt.
+    var webZugangBefehl: String { "wb-welt zugang \(ablage.isEmpty ? pfad : ablage) hinzufuegen --art web --name netz --bestaetigt" }
 
     func agent(_ id: String?) -> WeltAgent? { id.flatMap { i in agenten.first { $0.id == i } } }
     func ticket(_ id: String?) -> WeltTicket? { id.flatMap { i in tickets.first { $0.id == i } } }
@@ -559,6 +621,9 @@ struct WeltenNutzlast: Equatable, Sendable {
     /// Auftrag fernwelten: die eigene Maschine zuerst, dann die Agent-Maschinen; die Vorgabe beim Anlegen.
     var maschinen: [WeltMaschine] = []
     var maschineVorgabe = ""
+    /// Auftrag agentsform: die gemerkten Projektordner (`welten-projekte.json`) und die Bash-Muster des Dienstwegs je Stufe.
+    var gemerkteProjekte: [String] = []
+    var bashVorgabe: [String: [String]] = [:]
 
     var eigeneMaschine: WeltMaschine? { maschinen.first { $0.eigene } }
     /// Maschinen, auf die eine Welt ziehen oder auf denen sie entstehen kann: fern und mit Traeger.
@@ -571,6 +636,7 @@ struct WeltenNutzlast: Equatable, Sendable {
         a.geladen == b.geladen && a.welten == b.welten && a.datenbibliothek == b.datenbibliothek && a.globalPfad == b.globalPfad
             && a.vorlagen == b.vorlagen && a.modelle == b.modelle && a.entwurfModelle == b.entwurfModelle
             && a.maschinen == b.maschinen && a.maschineVorgabe == b.maschineVorgabe
+            && a.gemerkteProjekte == b.gemerkteProjekte && a.bashVorgabe == b.bashVorgabe
             && a.fehler.map { "\($0.quelle)\u{1f}\($0.text)" } == b.fehler.map { "\($0.quelle)\u{1f}\($0.text)" }
     }
 
@@ -588,7 +654,31 @@ struct WeltenNutzlast: Equatable, Sendable {
             entwurfModelle: texte(w, "entwurf_modelle"),
             globalPfad: text(w, "global_pfad"),
             maschinen: liste(w, "maschinen").map(WeltMaschine.init),
-            maschineVorgabe: text(w, "maschine_vorgabe"))
+            maschineVorgabe: text(w, "maschine_vorgabe"),
+            gemerkteProjekte: texte(w, "gemerkte_projekte"),
+            bashVorgabe: objekt(w, "bash_vorgabe").reduce(into: [:]) { r, e in if let v = e.value as? [String] { r[e.key] = v } })
+    }
+
+    /// Die Dienstwegmuster einer Stufe; ohne Angabe die eines Mitglieds, ohne beide keine.
+    func dienstweg(_ stufe: String) -> [String] { bashVorgabe[stufe] ?? bashVorgabe["mitglied"] ?? [] }
+
+    /// Die Modelle fuer Modell und Fallback: die der Welt (nicht verfuegbare mit Grund), sonst die Registry; eigene Werte bleiben waehlbar.
+    static func modellOptionen(_ w: Welt, registry modelle: [ModellZeile], eigene: [String]) -> [(wert: String, titel: String, verfuegbar: Bool)] {
+        var gesehen = Set<String>()
+        var raus: [(wert: String, titel: String, verfuegbar: Bool)] = []
+        if let ms = w.modelle {
+            // Die Kennung der Welt woertlich: der Traeger sucht genau diesen Namen.
+            for m in ms where gesehen.insert(m.id).inserted {
+                raus.append((m.id, m.verfuegbar ? "\(m.id) · \(m.harness)" : "\(m.id) · nicht verfügbar: \(WeltenWorte.modellGrund(m.grund))", m.verfuegbar))
+            }
+        } else {
+            for m in modelle {
+                let b = AgentEntwurf.teilen(m.kennung, "").0
+                if gesehen.insert(b).inserted { raus.append((b, "\(b) · \(m.harness)", true)) }
+            }
+        }
+        for e in eigene where !e.isEmpty && gesehen.insert(e).inserted { raus.append((e, e, true)) }
+        return raus
     }
 }
 
@@ -784,6 +874,18 @@ enum WeltenWorte {
     static func team(_ t: String) -> String { t.prefix(1).uppercased() + t.dropFirst() }
 
     static func maschine(_ m: String) -> String { m == "mac" ? "Mac" : m }
+
+    /// Auftrag agentsform: warum ein Modell der Welt nicht verfuegbar ist (agents_modellwahl.py), in Worten; unbekannt bleibt roh.
+    static func modellGrund(_ g: String) -> String {
+        switch g {
+        case "": return "ohne Grund"
+        case "nicht_in_registry": return "nicht in der Registry"
+        case "in_registry_abgeschaltet": return "in der Registry abgeschaltet"
+        case "nicht_fuer_diese_maschine": return "nicht für diese Maschine"
+        case "codex_nur_trockenlauf": return "Codex nur als Trockenlauf"
+        default: return g
+        }
+    }
 
     static let ticketStaende = ["offen", "läuft", "wartet", "braucht dich", "zur Abnahme", "abgenommen", "zurückgegeben", "unterbrochen", "verworfen"]
 

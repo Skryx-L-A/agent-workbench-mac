@@ -595,13 +595,20 @@ final class MacSteuerkanal {
                 // agents maschinen -- jede Agent-Maschine einmal fragen; die Auskunft traegt danach ihren Stand.
                 _ = await z.maschinenPruefen(echt: false)
                 return auskunft()
+            case "vergessen":
+                // agents vergessen <projektordner> -- wie „Aus der Liste entfernen" im Menue der Welten (Auftrag agentsform):
+                // der Kern fragt zurueck, `bestaetigen` nimmt den Eintrag aus welten-projekte.json; der Ordner bleibt.
+                guard !wert.isEmpty else { return MacSteuerantwort.fehler("\(befehl) vergessen <projektordner>") }
+                await z.vergessen(wert, echt: false)
+                return auskunft()
             default: break
             }
             let weltBefehle = ["welt", "waehlen", "klappen", "gespraech", "adressen", "senden", "antworten", "zuruecknehmen", "pause", "stoppen", "umziehen",
                                "bestaetigen", "ticket", "ticketfilter", "ticket-neu", "quittieren", "rueckgabe", "zurueckgeben", "profil",
-                               "profil-feld", "gedaechtnis", "gedaechtnis-text", "anlegen", "anlegen-feld", "skill-abnehmen", "skill-ablehnen", "skill-zeigen"]
+                               "profil-feld", "gedaechtnis", "gedaechtnis-text", "anlegen", "anlegen-feld", "rechte", "rechte-feld",
+                               "skill-abnehmen", "skill-ablehnen", "skill-zeigen"]
             guard weltBefehle.contains(was) else {
-                return MacSteuerantwort.fehler("\(befehl) kennt zeigen|schliessen|fenster|schuss|sichtbaum|erscheinung|darstellung|reiter|blatt|inspektor|abbrechen|welt-neu|welt-neu-auf|maschinen|\(weltBefehle.joined(separator: "|"))")
+                return MacSteuerantwort.fehler("\(befehl) kennt zeigen|schliessen|fenster|schuss|sichtbaum|erscheinung|darstellung|reiter|blatt|inspektor|abbrechen|welt-neu|welt-neu-auf|maschinen|vergessen|\(weltBefehle.joined(separator: "|"))")
             }
             guard let n = kern.welten, let w = z.welt(n) else { return MacSteuerantwort.fehler("noch keine Welt vom Kern") }
             switch was {
@@ -757,17 +764,57 @@ final class MacSteuerkanal {
                 case "pruefen": await z.entwurfPruefen(w, echt: false)
                 case "hausvorlage": await z.entwurfPruefen(w, anweisungenAusVorlage: true, echt: false)
                 case "sichern": await z.anlegenSichern(w, echt: false)
-                default: return MacSteuerantwort.fehler("welten anlegen oeffnen [vorlage]|vorschlagen|abbrechen|vorlage <name>|vorschlag [modell] [trocken]|ansicht gespraech|formular|gespraech <text> [modell] [trocken]|pruefen|hausvorlage|sichern")
+                case "rechte":
+                    // agents anlegen rechte auf|zu -- die Karte „Was der Agent darf" im Gespraech (Auftrag agentsform)
+                    guard z.anlegen != nil, arg == "auf" || arg == "zu" else { return MacSteuerantwort.fehler("\(befehl) anlegen rechte auf|zu (Menue offen?)") }
+                    z.anlegenRechteOffen(arg == "auf")
+                default: return MacSteuerantwort.fehler("\(befehl) anlegen oeffnen [vorlage]|vorschlagen|abbrechen|vorlage <name>|vorschlag [modell] [trocken]|ansicht gespraech|formular|gespraech <text> [modell] [trocken]|rechte auf|zu|pruefen|hausvorlage|sichern")
                 }
             case "anlegen-feld":
                 // welten anlegen-feld <feld> <wert>; welten anlegen-feld werkzeug <Name> an|aus
                 guard z.anlegen != nil else { return MacSteuerantwort.fehler("erst welten anlegen oeffnen") }
+                let alleWerkzeuge = ["Bash"] + WeltenZustand.werkzeuge + WeltenZustand.webWerkzeuge
                 if wert == "werkzeug" {
+                    // Auftrag agentsform: Bash bleibt, Web nur mit einem Zugang der Art web -- sonst kommt der Grund als Fehler.
                     let teile = arg.split(separator: " ").map(String.init)
-                    guard teile.count == 2, WeltenZustand.werkzeuge.contains(teile[0]) else { return MacSteuerantwort.fehler("welten anlegen-feld werkzeug <\(WeltenZustand.werkzeuge.joined(separator: "|"))> an|aus") }
-                    z.werkzeugSetzen(teile[0], teile[1] == "an")
+                    guard teile.count == 2, alleWerkzeuge.contains(teile[0]) else { return MacSteuerantwort.fehler("\(befehl) anlegen-feld werkzeug <\(alleWerkzeuge.joined(separator: "|"))> an|aus") }
+                    if let f = z.werkzeugSetzen(teile[0], teile[1] == "an", webZugang: w.webZugang, befehl: w.webZugangBefehl) { return MacSteuerantwort.fehler(f) }
+                } else if wert == "skill" {
+                    // agents anlegen-feld skill <name> an|aus -- ein Skill der Welt oder der Bibliothek
+                    let teile = arg.split(separator: " ").map(String.init)
+                    guard teile.count == 2 else { return MacSteuerantwort.fehler("\(befehl) anlegen-feld skill <name> an|aus") }
+                    z.skillSetzen(teile[0], teile[1] == "an")
+                } else if wert == "modell" || wert == "fallback" {
+                    // Nur Modelle, die der Traeger der Welt fahren kann.
+                    if let f = z.anlegenModell(wert, arg, w) { return MacSteuerantwort.fehler(f) }
                 } else if !z.anlegenFeld(wert, arg) {
-                    return MacSteuerantwort.fehler("welten anlegen-feld name|stufe|team|neues-team|spezialgebiet|modell|denkstufe|fallback|fallback-denkstufe|maschine|bash|skills|kontextgrenze|figur|farbe|anweisungen|beschreibung|vorschlagmodell <wert>")
+                    return MacSteuerantwort.fehler("\(befehl) anlegen-feld name|stufe|team|neues-team|spezialgebiet|modell|denkstufe|fallback|fallback-denkstufe|maschine|bash|skills|kontextgrenze|figur|farbe|anweisungen|beschreibung|vorschlagmodell <wert>; werkzeug <Name> an|aus; skill <name> an|aus")
+                }
+            // --- Auftrag agentsform: die Rechte eines bestehenden Agenten im Profil ------------
+            case "rechte":
+                switch wert {
+                case "bearbeiten":
+                    guard let a = w.agent(z.agentId) else { return MacSteuerantwort.fehler("erst einen Agenten waehlen") }
+                    z.blatt = .profil
+                    guard w.rechteAenderbar else { return MacSteuerantwort.fehler(WeltenInspektor.rechteNichtAusgerollt) }
+                    z.rechteEntwurf = WeltenZustand.RechteEntwurf(a, dienstweg: n.dienstweg(a.stufe))
+                case "abbrechen": z.rechteEntwurf = nil
+                case "sichern": await z.rechteSichern(w, echt: false)
+                default: return MacSteuerantwort.fehler("\(befehl) rechte bearbeiten|abbrechen|sichern")
+                }
+            case "rechte-feld":
+                // agents rechte-feld werkzeug <Name> an|aus | skill <name> an|aus | bash <muster\nmuster>
+                guard z.rechteEntwurf != nil else { return MacSteuerantwort.fehler("keine Rechte in Bearbeitung (\(befehl) rechte bearbeiten)") }
+                let teile = arg.split(separator: " ").map(String.init)
+                switch wert {
+                case "werkzeug":
+                    guard teile.count == 2 else { return MacSteuerantwort.fehler("\(befehl) rechte-feld werkzeug <Name> an|aus") }
+                    if let f = z.rechteWerkzeug(teile[0], teile[1] == "an", w) { return MacSteuerantwort.fehler(f) }
+                case "skill":
+                    guard teile.count == 2 else { return MacSteuerantwort.fehler("\(befehl) rechte-feld skill <name> an|aus") }
+                    z.rechteSkill(teile[0], teile[1] == "an")
+                case "bash": z.rechteEntwurf?.bash = arg.replacingOccurrences(of: "\\n", with: "\n")
+                default: return MacSteuerantwort.fehler("\(befehl) rechte-feld werkzeug <Name> an|aus|skill <name> an|aus|bash <muster\\nmuster>")
                 }
             case "ticket-neu":
                 // welten ticket-neu <an|-> <titel | ziel | fertig>

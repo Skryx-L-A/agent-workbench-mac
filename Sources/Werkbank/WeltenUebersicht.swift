@@ -72,13 +72,15 @@ enum WeltenUebersichtWorte {
         let knopf: String
         /// Wohin der Knopf fuehrt: `agent:<id>`.
         let ziel: String
+        /// Auftrag agentsform: die offene Frage, die hier gleich beantwortet werden kann; nil bei einer Nachricht.
+        var frage: String? = nil
     }
 
     /// Was den Menschen braucht: offene Fragen (Plan Abschnitt 13) und markierte, noch nicht quittierte Nachrichten.
     static func brauchtDich(_ w: Welt) -> [BrauchtDich] {
         var raus = w.offeneFragen.map { f in
-            BrauchtDich(id: "frage:\(f.id)", titel: "Frage von \(w.anzeigename(f.von))", text: f.text, knopf: "Antworten",
-                        ziel: "agent:\(w.hauptagent ?? f.von)")
+            BrauchtDich(id: "frage:\(f.id)", titel: "Frage von \(w.anzeigename(f.von))", text: f.text, knopf: "Im Chat ansehen",
+                        ziel: "agent:\(w.hauptagent ?? f.von)", frage: f.id)
         }
         for m in w.markiertOffen {
             let nachricht = (w.agent(m.von)?.einzelchat.compactMap(\.nachricht) ?? []).first { $0.id == m.zustellung }
@@ -97,6 +99,7 @@ enum WeltenUebersichtWorte {
             "hauptagentEinladung": w.hauptagent == nil,
             "teamAufbauen": w.hauptagent != nil && w.agenten.count == 1,
             "brauchtDich": brauchtDich(w).map(\.titel),
+            "brauchtDichFragen": brauchtDich(w).compactMap { e in e.frage.flatMap { w.frage($0) }.map { ["id": $0.id, "optionen": $0.optionenGeordnet, "empfehlung": $0.empfehlung ?? ""] as [String: Any] } },
             "karten": kartenFolge(w).compactMap { id -> [String: Any]? in
                 guard let a = w.agent(id) else { return nil }
                 return ["id": a.id, "zustand": WeltenWorte.zustand(a.zustand), "text": a.zustandText,
@@ -172,6 +175,17 @@ struct WeltenNeuEintraege: View {
             Button("In einem Projektordner …") { Task { await zustand.ordnerWaehlenUndAnlegen(echt: true) } }
             if !(nutzlast?.globalDa ?? false) {
                 Button("Global, für alle Projekte") { Task { await zustand.weltAnlegen(art: "global", echt: true) } }
+            }
+        }
+        // Auftrag agentsform: ein gemerkter Projektordner laesst sich aus der Liste nehmen; der Ordner bleibt, der Kern fragt zurueck.
+        if let gemerkt = nutzlast?.gemerkteProjekte, !gemerkt.isEmpty {
+            Section("Gemerkte Projektordner") {
+                Menu("Aus der Liste entfernen") {
+                    ForEach(gemerkt, id: \.self) { ordner in
+                        Button((ordner as NSString).abbreviatingWithTildeInPath) { Task { await zustand.vergessen(ordner, echt: true) } }
+                    }
+                }
+                .disabled(zustand.laufend.contains("vergessen"))
             }
         }
     }
@@ -507,23 +521,59 @@ struct WeltenUebersicht: View {
             VStack(alignment: .leading, spacing: 0) {
                 ForEach(Array(eintraege.enumerated()), id: \.element.id) { i, e in
                     if i > 0 { Divider().padding(.vertical, 8) }
-                    HStack(alignment: .firstTextBaseline, spacing: 10) {
-                        Zustandspunkt(art: .will, basis: 8)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(e.titel).font(.callout.weight(.semibold))
-                            Text(e.text).font(.callout).foregroundStyle(.secondary).lineLimit(2)
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack(alignment: .firstTextBaseline, spacing: 10) {
+                            Zustandspunkt(art: .will, basis: 8)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(e.titel).font(.callout.weight(.semibold))
+                                Text(e.text).font(.callout).foregroundStyle(.secondary).lineLimit(e.frage == nil ? 2 : 4)
+                            }
+                            Spacer(minLength: 8)
+                            Button(e.knopf) {
+                                zustand.waehlen(e.ziel, welt)
+                                zustand.reiter = .chat
+                            }
                         }
-                        Spacer(minLength: 8)
-                        Button(e.knopf) {
-                            zustand.waehlen(e.ziel, welt)
-                            zustand.reiter = .chat
+                        .accessibilityElement(children: .combine)
+                        // Auftrag agentsform: eine gespeicherte Frage gleich hier beantworten -- Option oder eigener Text.
+                        if let id = e.frage, let f = welt.frage(id), f.offen {
+                            frageAntwort(f).padding(.leading, 18)
                         }
                     }
-                    .accessibilityElement(children: .combine)
                 }
             }
             .weltenKarte()
         }
+    }
+
+    private func frageAntwort(_ f: WeltFrage) -> some View {
+        let entwurf = Binding(get: { zustand.antwortEntwuerfe[f.id] ?? "" }, set: { zustand.antwortEntwuerfe[f.id] = $0 })
+        return VStack(alignment: .leading, spacing: 6) {
+            if !f.optionen.isEmpty {
+                FlussLayout(abstand: 6) {
+                    ForEach(f.optionenGeordnet, id: \.self) { o in
+                        if o == f.empfehlung {
+                            Button("\(o) (Empfehlung)") { Task { await zustand.antworten(welt, frage: f.id, text: o, echt: true) } }
+                                .buttonStyle(.borderedProminent)
+                        } else {
+                            Button(o) { Task { await zustand.antworten(welt, frage: f.id, text: o, echt: true) } }
+                        }
+                    }
+                }
+            }
+            HStack(spacing: 8) {
+                TextField("Eigene Antwort", text: entwurf)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit { Task { await zustand.antworten(welt, frage: f.id, text: entwurf.wrappedValue, echt: true) } }
+                    .accessibilityIdentifier("welten-uebersicht-antwort-\(f.id)")
+                Button("Antworten") { Task { await zustand.antworten(welt, frage: f.id, text: entwurf.wrappedValue, echt: true) } }
+                    .disabled(entwurf.wrappedValue.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+        }
+        .controlSize(.small)
+        .disabled(zustand.laufend.contains("antworten"))
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Antwort auf: \(f.text)")
     }
 
     // --- Agenten -----------------------------------------------------------------------
