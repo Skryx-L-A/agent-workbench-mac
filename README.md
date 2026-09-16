@@ -10,12 +10,17 @@ Highlightr.
 
 <br clear="left">
 
-<p align="center"><img src="assets/vorschau-mac-agents-dunkel.png" alt="The Agents tab of the Mac shell: a main agent in its chat, with a question waiting for an answer" width="900"></p>
+<p align="center"><img src="assets/vorschau-mac-orchestrator-dunkel.png" alt="The Code tab of the Mac shell: the lead session's pane running Claude Code, with projects and sessions on the left" width="900"></p>
 
-<p align="center"><img src="assets/vorschau-mac-uebersicht-dunkel.png" alt="The overview of a world: agents, open tickets, the latest channel messages" width="900"></p>
+<p align="center"><img src="assets/vorschau-mac-code-dunkel.png" alt="The Code tab of the Mac shell: three worker panes side by side, each a live tmux pane running Claude Code" width="900"></p>
 
-Both pictures come from a demo world that the acceptance tooling creates on its own; nothing in
-them belongs to a real machine.
+<p align="center"><img src="assets/vorschau-mac-agents-dunkel.png" alt="The Agents tab of the Mac shell: the main agent's chat with a question waiting for your answer" width="900"></p>
+
+<p align="center"><img src="assets/vorschau-mac-uebersicht-dunkel.png" alt="The overview of a world: what needs you, the agents with their state and the open tickets" width="900"></p>
+
+The pictures are screenshots of the app itself at its normal size, taken with a demo project: the
+terminal panes replay an invented session, and nothing in them belongs to a real machine. Most of
+the Mac shell's own labels are still German; the content follows the project.
 
 ## This repository is the Mac shell alone
 

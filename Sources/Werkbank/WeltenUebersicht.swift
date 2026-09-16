@@ -182,7 +182,7 @@ struct WeltenNeuEintraege: View {
             Section("Gemerkte Projektordner") {
                 Menu("Aus der Liste entfernen") {
                     ForEach(gemerkt, id: \.self) { ordner in
-                        Button((ordner as NSString).abbreviatingWithTildeInPath) { Task { await zustand.vergessen(ordner, echt: true) } }
+                        Button(kurzerPfad(ordner)) { Task { await zustand.vergessen(ordner, echt: true) } }
                     }
                 }
                 .disabled(zustand.laufend.contains("vergessen"))
@@ -292,7 +292,7 @@ struct WeltenEinladung: View {
 
     private var globalPfad: String {
         let p = kern.welten?.globalPfad ?? ""
-        return p.isEmpty ? "~/.claude/workbench/agents" : (p as NSString).abbreviatingWithTildeInPath
+        return p.isEmpty ? "~/.claude/workbench/agents" : kurzerPfad(p)
     }
 
     var body: some View {

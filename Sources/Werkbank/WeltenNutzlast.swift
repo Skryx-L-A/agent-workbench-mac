@@ -687,7 +687,7 @@ struct WeltenNutzlast: Equatable, Sendable {
 enum WeltenWorte {
     /// Der Untertitel unter dem Namen der Welt: die globale Welt oder ihr Projekt, dazu ihre Maschine („~/AI/myproject · peer").
     static func herkunft(_ w: Welt) -> String {
-        let ort = w.art == "global" ? "Globale Welt" : (w.projekt.map { w.fern ? kurzpfad($0) : ($0 as NSString).abbreviatingWithTildeInPath } ?? "")
+        let ort = w.art == "global" ? "Globale Welt" : (w.projekt.map { w.fern ? kurzpfad($0) : kurzerPfad($0) } ?? "")
         return [ort, maschine(w.maschine)].filter { !$0.isEmpty }.joined(separator: " · ")
     }
 

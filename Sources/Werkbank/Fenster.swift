@@ -231,10 +231,12 @@ final class Fenster: NSObject, NSToolbarDelegate, NSWindowDelegate, NSMenuItemVa
         aktivitaetZustand = AktivitaetZustand(kern: kern, editor: editorZustand)
         protokolleZustand = ProtokolleZustand(kern: kern, editor: editorZustand)
         pfadOeffner = Pfadoeffner(kern: kern, editor: editorZustand)
-        fenster = NSWindow(
+        let haupt = Hauptfenster(
             contentRect: NSRect(x: 0, y: 0, width: 1100, height: 700),
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered, defer: false)
+        haupt.groesserAlsBildschirm = optionen.pruefmodus
+        fenster = haupt
         super.init()
         // Zugeklappte Projekte (Politur 08.09.): kopflos in einer Datei im
         // Laufverzeichnis, sichtbar in den Voreinstellungen -- derselbe Weg wie
@@ -1052,9 +1054,12 @@ final class Fenster: NSObject, NSToolbarDelegate, NSWindowDelegate, NSMenuItemVa
     }
 
     /// Kopflos ohne Animator (gemessen 06.09.: `animator().isCollapsed.toggle()`
-    /// las in einem nie gezeigten Fenster den alten Wert und blieb zu).
+    /// las in einem nie gezeigten Fenster den alten Wert und blieb zu). Dasselbe
+    /// gilt ohne Fokus hinter anderen Fenstern (gemessen 16.09., vorschau-mac.sh):
+    /// `agents inspektor an` blieb zu, der Abgleich las die ausbleibende Bewegung
+    /// als Zug am Teiler und nahm den Zustand zurueck.
     private func blattSetzen(_ item: NSSplitViewItem, offen: Bool) {
-        if optionen.kopflos { item.isCollapsed = !offen } else { item.animator().isCollapsed = !offen }
+        if optionen.pruefmodus { item.isCollapsed = !offen } else { item.animator().isCollapsed = !offen }
         // Dieselbe Bewegung wie an der Seitenleiste, dieselbe Nachsorge.
         terminal.flaecheSpaeterMelden(ruhe: TerminalBereich.bewegungsruhe)
         // Das Blatt geht in der gemerkten Breite auf (`blattBreite` des Kerns).
@@ -2407,5 +2412,19 @@ final class Aufteilung: NSSplitViewController {
         let neu = !seite.isCollapsed
         if animiert { seite.animator().isCollapsed = neu } else { seite.isCollapsed = neu }
         aufUmschalten?()
+    }
+}
+
+/// DAS HAUPTFENSTER EINER PRUEFUNG DARF GROESSER SEIN ALS DER BILDSCHIRM (16.09.2026).
+/// AppKit kuerzt einen Rahmen sonst auf den sichtbaren Bildschirm -- gemessen: `fenster
+/// 1728x1080` wurde auf einem 14-Zoll-Bildschirm zu 1728x908. Die Vorschaubilder
+/// (publish/tools/vorschau-mac.sh) zeigen die Werkbank in der Groesse eines Menschen an
+/// einem grossen Bildschirm. Ausserhalb einer Pruefung (kopflos, ohne Fokus) bleibt das
+/// gewohnte Verhalten.
+final class Hauptfenster: NSWindow {
+    var groesserAlsBildschirm = false
+
+    override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect {
+        groesserAlsBildschirm ? frameRect : super.constrainFrameRect(frameRect, to: screen)
     }
 }

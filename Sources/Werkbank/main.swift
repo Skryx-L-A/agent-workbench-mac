@@ -61,11 +61,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSApp.setActivationPolicy(.accessory)
             fenster.fenster.layoutIfNeeded()
         } else if optionen.ohneFokus {
-            // Sichtbar, aber ohne Fokusdiebstahl: `orderFrontRegardless` zeigt
-            // das Fenster, ohne die App nach vorn zu holen -- was `open -g`
-            // fuer eine fremde App tut, tut das hier fuer die eigene.
+            // Sichtbar, aber ohne Fokusdiebstahl und HINTER allen anderen Fenstern
+            // (regeln/tests-und-eingriffe.md). `orderBack` stellt das Fenster auf den
+            // Bildschirm, ohne die App nach vorn zu holen; `orderFrontRegardless`
+            // legte es beim Start fuer einige Sekunden vor die Arbeit des Menschen,
+            // bis `agents zeigen` es zuruecklegte (16.09.2026). Belegbilder zeichnen
+            // es auch verdeckt (Glasbeleg, `screencapture -l`).
             NSApp.setActivationPolicy(.regular)
-            fenster.fenster.orderFrontRegardless()
+            fenster.fenster.orderBack(nil)
         } else {
             NSApp.setActivationPolicy(.regular)
             fenster.fenster.makeKeyAndOrderFront(nil)

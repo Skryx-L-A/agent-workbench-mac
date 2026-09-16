@@ -2055,7 +2055,7 @@ struct WeltenInspektor: View {
         VStack(alignment: .leading, spacing: 1) {
             Text(name).font(.caption).foregroundStyle(.secondary)
             HStack(spacing: 4) {
-                Text((pfad as NSString).abbreviatingWithTildeInPath)
+                Text(kurzerPfad(pfad))
                     .font(.callout.monospaced()).lineLimit(1).truncationMode(.middle)
                     .help(pfad)
                 Button {
