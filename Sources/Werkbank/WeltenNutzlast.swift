@@ -78,22 +78,54 @@ struct WeltTicketEreignis: Equatable, Sendable {
     let zeit, ereignis, von, text: String
 }
 
+/// Ein Punkt der Fertig-Liste (`done_items`, Plan Satz 2); abgehakt wird nur vom Bearbeiter.
+struct WeltFertigPunkt: Equatable, Identifiable, Sendable {
+    let text: String
+    let erledigt: Bool
+    let von, zeit: String?
+    let nr: Int
+    var id: Int { nr }
+}
+
 struct WeltTicket: Equatable, Identifiable, Sendable {
     let id, titel, ziel, fertig, stand, absender, angelegt, geaendert: String
     let adressaten, abhaengig, wartetAuf: [String]
     let team, bearbeiter: String?
     let ergebnis: (text: String, commit: String?, von: String, zeit: String)?
-    let abnahme: (von: String, zeit: String, bemerkung: String?)?
+    let abnahme: (von: String, zeit: String, bemerkung: String?, grund: String?)?
     let verlauf: [WeltTicketEreignis]
     let grenzen: [String: String]
     /// `limits.art`, etwa `skill-vorschlag` (Auftrag Nr. 4), und der Vorschlag mit Diff.
     let art: String
     let skillVorschlag: WeltSkillVorschlag?
+    // --- tickets1 bis tickets3, gezeigt seit tickets4 (Plan Saetze 35 bis 41, 44, 46, 50) ---
+    /// Art des Tickets (`vorhaben`, `story`, `task`, `subtask`, `auftrag`, `fehler`, `recherche`, `pruefung`, `skill-vorschlag`).
+    let kind: String
+    /// 0 sofort, 1 hoch, 2 normal, 3 später; `prioritaetText` ist der Bedeutungstext des Kerns.
+    let prioritaet: Int
+    let prioritaetText: String
+    /// `grau`, `gelb`, `rot` aus `deadline_state`; leer ohne Frist.
+    let ampel: String
+    let eltern, herkunft, duplikatVon, zyklus: String?
+    /// Backlog-Reihenfolge in der Triage (Satz 44); nil ausserhalb der Triage.
+    let ordnung: Int?
+    let fertigPunkte: [WeltFertigPunkt]
+    let kinderGesamt, kinderAbgenommen: Int
+    /// Messung je Ticket (Satz 50): Durchlaufzeit, Alter (Sekunden) und Züge.
+    let durchlaufzeit, alterSekunden, zuege: Int
+    let geparkt: (grund: String, bis: String?, auf: String?)?
+    let flagge: (grund: String, frage: String?, vorher: String?)?
+    let verworfen: (code: String, bemerkung: String?, duplikatVon: String?)?
+    let pruefung: (pruefer: String, revision: Int, angefordertVon: String, notiz: String?, urteil: String?)?
 
     static func == (a: WeltTicket, b: WeltTicket) -> Bool {
         a.id == b.id && a.stand == b.stand && a.geaendert == b.geaendert && a.verlauf == b.verlauf
             && a.titel == b.titel && a.adressaten == b.adressaten && a.bearbeiter == b.bearbeiter && a.wartetAuf == b.wartetAuf
             && a.art == b.art && a.skillVorschlag == b.skillVorschlag
+            && a.kind == b.kind && a.prioritaet == b.prioritaet && a.ampel == b.ampel && a.ordnung == b.ordnung
+            && a.fertigPunkte == b.fertigPunkte && a.kinderGesamt == b.kinderGesamt && a.kinderAbgenommen == b.kinderAbgenommen
+            && a.pruefung?.pruefer == b.pruefung?.pruefer && a.pruefung?.urteil == b.pruefung?.urteil
+            && a.geparkt?.grund == b.geparkt?.grund && a.flagge?.grund == b.flagge?.grund && a.verworfen?.code == b.verworfen?.code
     }
 
     init(_ j: [String: Any]) {
@@ -105,13 +137,35 @@ struct WeltTicket: Equatable, Identifiable, Sendable {
             ergebnis = (text(e, "text"), optText(e, "commit"), text(e, "von"), text(e, "zeit"))
         } else { ergebnis = nil }
         if let a = j["abnahme"] as? [String: Any] {
-            abnahme = (text(a, "von"), text(a, "zeit"), optText(a, "bemerkung"))
+            abnahme = (text(a, "von"), text(a, "zeit"), optText(a, "bemerkung"), optText(a, "grund"))
         } else { abnahme = nil }
         verlauf = liste(j, "verlauf").map { WeltTicketEreignis(zeit: text($0, "zeit"), ereignis: text($0, "ereignis"), von: text($0, "von"), text: text($0, "text")) }
         grenzen = objekt(j, "grenzen").reduce(into: [:]) { $0[$1.key] = "\($1.value)" }
         art = text(j, "art")
         skillVorschlag = (j["skill_vorschlag"] as? [String: Any]).map(WeltSkillVorschlag.init)
+        kind = text(j, "kind").isEmpty ? "auftrag" : text(j, "kind")
+        prioritaet = (j["prioritaet"] as? NSNumber).map(\.intValue) ?? 2
+        prioritaetText = text(j, "prioritaet_text")
+        ampel = text(j, "ampel")
+        eltern = optText(j, "eltern"); herkunft = optText(j, "herkunft"); duplikatVon = optText(j, "duplikat_von")
+        zyklus = optText(j, "zyklus")
+        ordnung = (j["ordnung"] as? NSNumber).flatMap { CFGetTypeID($0) == CFBooleanGetTypeID() ? nil : $0.intValue }
+        fertigPunkte = liste(j, "fertig_punkte").enumerated().map { nr, p in
+            WeltFertigPunkt(text: text(p, "text"), erledigt: p["erledigt"] as? Bool ?? false,
+                            von: optText(p, "von"), zeit: optText(p, "zeit"), nr: nr + 1)
+        }
+        kinderGesamt = ganz(j, "kinder_gesamt"); kinderAbgenommen = ganz(j, "kinder_abgenommen")
+        durchlaufzeit = ganz(j, "durchlaufzeit_s"); alterSekunden = ganz(j, "alter_s"); zuege = ganz(j, "zuege")
+        if let p = j["geparkt"] as? [String: Any] { geparkt = (text(p, "grund"), optText(p, "bis"), optText(p, "auf")) } else { geparkt = nil }
+        if let f = j["flagge"] as? [String: Any] { flagge = (text(f, "grund"), optText(f, "frage"), optText(f, "vorher")) } else { flagge = nil }
+        if let v = j["verworfen"] as? [String: Any] { verworfen = (text(v, "code"), optText(v, "bemerkung"), optText(v, "duplikat_von")) } else { verworfen = nil }
+        if let r = j["pruefung"] as? [String: Any] {
+            pruefung = (text(r, "pruefer"), ganz(r, "revision"), text(r, "angefordert_von"), optText(r, "notiz"), optText(r, "urteil"))
+        } else { pruefung = nil }
     }
+
+    /// Wie viele Punkte der Fertig-Liste abgehakt sind; (0, 0) ohne Liste.
+    var fertigStand: (erledigt: Int, gesamt: Int) { (fertigPunkte.filter(\.erledigt).count, fertigPunkte.count) }
 }
 
 struct WeltFrage: Equatable, Identifiable, Sendable {
@@ -444,6 +498,38 @@ struct WeltTeam: Equatable, Identifiable, Sendable {
     var id: String { name }
 }
 
+/// Ein abgeschlossener Zyklus mit seinen Zahlen (`zyklen.jsonl`, Plan Satz 46).
+struct WeltZyklus: Equatable, Identifiable, Sendable {
+    let id, start, ende, ziel, abgeschlossen: String
+    let angelegt, abgenommen, uebertragen, verworfen: Int
+}
+
+/// Der Zyklus einer Welt: eingeschaltet, Länge, der laufende und die Historie.
+struct WeltZyklusStand: Equatable, Sendable {
+    let an: Bool
+    let tage: Int
+    let jetzt: (id: String, start: String, ende: String, ziel: String)?
+    let historie: [WeltZyklus]
+
+    static func == (a: WeltZyklusStand, b: WeltZyklusStand) -> Bool {
+        a.an == b.an && a.tage == b.tage && a.jetzt?.id == b.jetzt?.id && a.jetzt?.ziel == b.jetzt?.ziel
+            && a.historie == b.historie
+    }
+
+    init(_ j: [String: Any]) {
+        an = j["an"] as? Bool ?? false
+        tage = ganz(j, "tage")
+        if let n = j["jetzt"] as? [String: Any], !text(n, "id").isEmpty {
+            jetzt = (text(n, "id"), text(n, "start"), text(n, "ende"), text(n, "ziel"))
+        } else { jetzt = nil }
+        historie = liste(j, "historie").map {
+            WeltZyklus(id: text($0, "id"), start: text($0, "start"), ende: text($0, "ende"), ziel: text($0, "ziel"),
+                       abgeschlossen: text($0, "abgeschlossen"), angelegt: ganz($0, "angelegt"),
+                       abgenommen: ganz($0, "abgenommen"), uebertragen: ganz($0, "uebertragen"), verworfen: ganz($0, "verworfen"))
+        }
+    }
+}
+
 struct WeltDirektchat: Equatable, Identifiable, Sendable {
     let id: String
     let teilnehmer: [String]
@@ -458,6 +544,11 @@ struct Welt: Equatable, Identifiable, Sendable {
     let konsistent: Bool
     let fehler: [String]
     let brauchenDich, laufen, ticketsOffen: Int
+    /// tickets4: die Triage getrennt (Satz 35), die weiche WIP-Grenze (Satz 48), Zyklus (46) und DoD (49).
+    let triage: Int
+    let wip: (laufend: Int, grenze: Int)
+    let zyklus: WeltZyklusStand
+    let dod: [String]
     let teams: [WeltTeam]
     let ohneTeam, liste: [String]
     let agenten: [WeltAgent]
@@ -513,6 +604,7 @@ struct Welt: Equatable, Identifiable, Sendable {
             && a.traegerZugFehler == b.traegerZugFehler
             && a.modelle == b.modelle && a.maschineVorgabe == b.maschineVorgabe && a.skillKatalog == b.skillKatalog
             && a.webZugang == b.webZugang && a.rechteAenderbar == b.rechteAenderbar
+            && a.triage == b.triage && a.wip == b.wip && a.zyklus == b.zyklus && a.dod == b.dod
     }
 
     init(_ j: [String: Any]) {
@@ -523,6 +615,11 @@ struct Welt: Equatable, Identifiable, Sendable {
         fehler = texte(j, "fehler")
         let z = objekt(j, "zaehler")
         brauchenDich = ganz(z, "brauchen_dich"); laufen = ganz(z, "laufen"); ticketsOffen = ganz(z, "tickets_offen")
+        triage = ganz(z, "triage")
+        let wp = objekt(j, "wip")
+        wip = (ganz(wp, "laufend"), ganz(wp, "grenze"))
+        zyklus = WeltZyklusStand(objekt(j, "zyklus"))
+        dod = texte(j, "dod")
         teams = Werkbank.liste(j, "teams").map { WeltTeam(name: text($0, "name"), leiter: optText($0, "leiter"), mitglieder: texte($0, "mitglieder"), aktiv: ganz($0, "aktiv")) }
         ohneTeam = texte(j, "ohne_team"); liste = texte(j, "liste")
         agenten = Werkbank.liste(j, "agenten").map(WeltAgent.init)
@@ -854,8 +951,8 @@ enum WeltenWorte {
         switch stand {
         case "läuft": .laeuft
         case "braucht dich": .will
-        case "zur Abnahme": .fertig
-        case "zurückgegeben", "unterbrochen": .aus
+        case "zur Abnahme", "in Prüfung": .fertig
+        case "zurückgegeben", "unterbrochen", "verworfen": .aus
         case "wartet": .pausiert
         default: .ruhig
         }
@@ -887,7 +984,152 @@ enum WeltenWorte {
         }
     }
 
-    static let ticketStaende = ["offen", "läuft", "wartet", "braucht dich", "zur Abnahme", "abgenommen", "zurückgegeben", "unterbrochen", "verworfen"]
+    static let ticketStaende = ["triage", "offen", "läuft", "wartet", "braucht dich", "zur Abnahme", "in Prüfung", "abgenommen", "zurückgegeben", "unterbrochen", "verworfen"]
+
+    // --- tickets4: die Worte des Ticketsystems (Plan Saetze 3, 5, 31, 40, 43, 47, 50) ---------
+
+    /// Die Spalten des Boards in Bearbeitungsrichtung (AGIL Abschnitt 5); `zurückgegeben` liegt
+    /// in `offen` und steht dort als Abzeichen, `verworfen` und `unterbrochen` stehen nicht im Board.
+    static let boardSpalten = ["triage", "offen", "läuft", "wartet", "braucht dich", "zur Abnahme", "in Prüfung", "abgenommen"]
+
+    /// Welche Stände eine Board-Spalte fasst.
+    static func boardStaende(_ spalte: String) -> [String] {
+        spalte == "offen" ? ["offen", "zurückgegeben"] : [spalte]
+    }
+
+    /// Die Ticketarten im Formular, mit Erklärung je Art (Satz 3 und AGIL Abschnitt 2).
+    static let ticketArten = ["vorhaben", "story", "task", "subtask", "auftrag", "fehler", "recherche", "pruefung"]
+
+    static func kind(_ k: String) -> String {
+        switch k {
+        case "vorhaben": "Vorhaben"
+        case "story": "Story"
+        case "task": "Task"
+        case "subtask": "Subtask"
+        case "auftrag": "Auftrag"
+        case "fehler": "Fehler"
+        case "recherche": "Recherche"
+        case "pruefung": "Prüfung"
+        case "skill-vorschlag": "Skill-Vorschlag"
+        default: k
+        }
+    }
+
+    static func kindErklaerung(_ k: String) -> String {
+        switch k {
+        case "vorhaben": "Das Ganze: Ziel, Nutzen und Fertig-Kriterium. Wird in Stories zerlegt."
+        case "story": "Ein Stück Nutzen, das für sich abnehmbar ist. Wird erst zerlegt, wenn sie läuft."
+        case "task": "Ein Arbeitsschritt einer Story, in einem oder wenigen Zügen zu schaffen."
+        case "subtask": "Der kleinste Schritt unter einem Task; hat selbst keine Kinder."
+        case "auftrag": "Ein Auftrag ohne Hierarchie -- die Vorgabe, wenn nichts anderes passt."
+        case "fehler": "Etwas geht nicht. Das Fertig-Kriterium nennt, woran man es misst."
+        case "recherche": "Etwas herausfinden; das Ergebnis ist die Antwort, nicht der Code."
+        case "pruefung": "Ein zweiter Blick mit frischem Kontext, ohne Schreibwerkzeuge."
+        case "skill-vorschlag": "Ein Skill, den ein Agent vorschlägt; die Abnahme entscheidet."
+        default: ""
+        }
+    }
+
+    /// Die vier Stufen mit Bedeutungstext (Satz 5). Der Kern schickt den Text mit; fehlt er, gilt dieser.
+    static func prioritaet(_ p: Int) -> String {
+        switch p {
+        case 0: "P0 sofort"
+        case 1: "P1 hoch"
+        case 3: "P3 später"
+        default: "P2 normal"
+        }
+    }
+
+    static func prioritaetText(_ p: Int) -> String {
+        switch p {
+        case 0: "sofort: der Betrieb steht oder Daten sind in Gefahr"
+        case 1: "hoch"
+        case 3: "später"
+        default: "normal (Vorgabe)"
+        }
+    }
+
+    /// Ob die Stufe in der Liste hervorgehoben steht (0 und 1, Auftrag tickets4 A).
+    static func prioritaetHervor(_ p: Int) -> Bool { p <= 1 }
+
+    /// Die Frist-Ampel (Satz 31): grau, gelb ab einem Tag vorher, rot ab Ablauf.
+    static func ampel(_ a: String) -> String {
+        switch a {
+        case "rot": "Frist abgelaufen"
+        case "gelb": "Frist heute"
+        case "grau": "Frist gesetzt"
+        default: ""
+        }
+    }
+
+    static func ampelPunkt(_ a: String) -> Punktart {
+        switch a {
+        case "rot": .will
+        case "gelb": .fertig
+        default: .ruhig
+        }
+    }
+
+    /// Die Grundcodes des Verwerfens (Satz 40).
+    static let verwerfGruende = ["duplikat", "anderswo-erledigt", "nicht-mehr-noetig", "nicht-reproduzierbar", "abgelehnt"]
+
+    static func verwerfGrund(_ g: String) -> String {
+        switch g {
+        case "duplikat": "Duplikat"
+        case "anderswo-erledigt": "anderswo erledigt"
+        case "nicht-mehr-noetig": "nicht mehr nötig"
+        case "nicht-reproduzierbar": "nicht reproduzierbar"
+        case "abgelehnt": "abgelehnt"
+        default: g
+        }
+    }
+
+    static func abnahmeGrund(_ g: String) -> String {
+        switch g {
+        case "erledigt": "erledigt"
+        case "teilweise": "teilweise (Rest als neues Ticket)"
+        default: g
+        }
+    }
+
+    static func urteil(_ u: String) -> String {
+        switch u {
+        case "bestanden": "bestanden"
+        case "maengel": "Mängel"
+        default: u
+        }
+    }
+
+    /// Eine Dauer in Sekunden als Wort für die Messung (Satz 50).
+    static func dauerWort(_ s: Int) -> String {
+        if s < 60 { return "\(s) s" }
+        if s < 3600 { return "\(s / 60) min" }
+        if s < 86_400 { return "\(s / 3600) h" }
+        let tage = s / 86_400
+        return tage == 1 ? "1 Tag" : "\(tage) Tage"
+    }
+
+    /// Die getrennten Weltzähler in der Symbolleiste (Satz 35).
+    static func zaehlerGetrennt(_ w: Welt) -> String {
+        ["\(w.brauchenDich) \(w.brauchenDich == 1 ? "braucht" : "brauchen") dich",
+         "\(w.triage) Triage",
+         "\(w.laufen) \(w.laufen == 1 ? "läuft" : "laufen")",
+         "\(w.ticketsOffen) offen"].joined(separator: " · ")
+    }
+
+    /// DIE DEFINITION OF READY ALS VORSCHAU (Satz 45, Auftrag tickets4 C). Dieselbe Reihenfolge
+    /// wie `_definition_of_ready_grund` in shell/agents_data.py; sie warnt, sie blockt nicht.
+    /// nil heisst: das Ticket wird zugestellt.
+    static func bereitschaft(kind: String, punkte: Int, frist: String, runden: String,
+                             adressaten: Bool, titel: String, ziel: String, fertig: String) -> String? {
+        let leer = { (s: String) in s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        if leer(titel) || leer(ziel) || leer(fertig) { return "Titel, Ziel oder Fertig-Kriterium fehlt" }
+        if kind == "vorhaben" { return nil }
+        if ["story", "task", "subtask"].contains(kind), punkte == 0 { return "die Fertig-Liste fehlt" }
+        if leer(frist), leer(runden) { return "die Grenzen fehlen (keine Frist, keine Rundenzahl)" }
+        if !adressaten { return "der Adressat fehlt -- das Ticket bleibt in der Triage" }
+        return nil
+    }
 
     static func profilfeld(_ f: String) -> String {
         switch f {
@@ -914,6 +1156,28 @@ enum WeltenWorte {
         case "fortgesetzt": "fortgesetzt"
         case "profil": "Profil geändert"
         case "gedaechtnis": "Gedächtnis bearbeitet"
+        // tickets1 bis tickets3: die neuen Übergänge und Vermerke im Ticketverlauf
+        case "geparkt": "geparkt"
+        case "geweckt": "geweckt"
+        case "braucht-dich": "braucht dich"
+        case "beantwortet": "Frage beantwortet"
+        case "verworfen": "verworfen"
+        case "umadressiert": "umadressiert"
+        case "zwischenstand": "Zwischenstand"
+        case "fertig-gehaekt": "Fertig-Punkt abgehakt"
+        case "fertig-zurueck": "Fertig-Punkt zurückgenommen"
+        case "pruefung-angefordert": "Prüfung angefordert"
+        case "pruefnotiz": "Prüfnotiz"
+        case "frei": "frei geworden"
+        case "duplikat-gemeldet": "Duplikat gemeldet"
+        case "abhaengigkeit-verworfen": "Abhängigkeit verworfen"
+        case "kinder-fertig": "alle Kinder abgenommen"
+        case "folgeticket": "Folgeticket entdeckt"
+        case "geordnet": "Backlog geordnet"
+        case "uebertragen": "in den nächsten Zyklus übertragen"
+        case "grenzen-geaendert": "Grenzen geändert"
+        case "angenommen": "aus der Triage angenommen"
+        case "zug": "Zug"
         default: e
         }
     }
@@ -935,9 +1199,6 @@ enum WeltenWorte {
         return f.date(from: iso)
     }
 
-    static func zaehler(_ w: Welt) -> String {
-        "\(w.brauchenDich) \(w.brauchenDich == 1 ? "braucht" : "brauchen") dich · \(w.laufen) \(w.laufen == 1 ? "läuft" : "laufen") · \(w.ticketsOffen) \(w.ticketsOffen == 1 ? "Ticket" : "Tickets") offen"
-    }
 }
 
 // MARK: Ungelesen

@@ -76,7 +76,9 @@ enum WeltenUebersichtWorte {
         var frage: String? = nil
     }
 
-    /// Was den Menschen braucht: offene Fragen (Plan Abschnitt 13) und markierte, noch nicht quittierte Nachrichten.
+    /// Was den Menschen braucht: offene Fragen (Plan Abschnitt 13), markierte, noch nicht
+    /// quittierte Nachrichten und -- seit tickets4 -- Tickets im Stand `braucht dich` mit ihrem
+    /// Grund (Plan Sätze 21, 31, 35).
     static func brauchtDich(_ w: Welt) -> [BrauchtDich] {
         var raus = w.offeneFragen.map { f in
             BrauchtDich(id: "frage:\(f.id)", titel: "Frage von \(w.anzeigename(f.von))", text: f.text, knopf: "Im Chat ansehen",
@@ -89,7 +91,39 @@ enum WeltenUebersichtWorte {
                                     titel: m.markierung == "frage" ? "Frage von \(w.anzeigename(m.von))" : "Ergebnis von \(w.anzeigename(m.von))",
                                     text: nachricht?.text ?? "Im Chat mit \(w.anzeigename(m.von)).", knopf: "Ansehen", ziel: "agent:\(m.von)"))
         }
+        for t in w.tickets where t.stand == "braucht dich" {
+            let grund = t.flagge?.grund ?? ""
+            raus.append(BrauchtDich(id: "ticket:\(t.id)", titel: "Ticket „\(t.titel)“",
+                                    text: grund.isEmpty ? "Das Ticket hängt an dir." : grund,
+                                    knopf: "Ticket öffnen", ziel: "ticket:\(t.id)"))
+        }
         return raus
+    }
+
+    /// Die ersten Tickets des Backlogs für die Übersicht (Plan Satz 44).
+    static func triage(_ w: Welt) -> [WeltTicket] { WeltenZustand.backlog(w) }
+
+    /// Ein Vorhaben mit seinem Fortschritt (Plan Sätze 42, 51): „3 von 5 Stories abgenommen".
+    struct VorhabenStand: Identifiable, Equatable {
+        let id: String
+        let titel: String
+        let stand: String
+        let abgenommen: Int
+        let gesamt: Int
+        var fertig: Bool { stand == "abgenommen" }
+        var text: String {
+            gesamt == 0 ? "noch keine Stories" : "\(abgenommen) von \(gesamt) \(gesamt == 1 ? "Story" : "Stories") abgenommen"
+        }
+    }
+
+    /// Die Vorhaben der Welt mit dem Fortschritt ihrer Stories; abgeschlossene zuletzt.
+    static func vorhaben(_ w: Welt) -> [VorhabenStand] {
+        w.tickets.filter { $0.kind == "vorhaben" }.map { v in
+            let stories = w.tickets.filter { $0.eltern == v.id && $0.stand != "verworfen" }
+            return VorhabenStand(id: v.id, titel: v.titel, stand: v.stand,
+                                 abgenommen: stories.filter { $0.stand == "abgenommen" }.count, gesamt: stories.count)
+        }
+        .sorted { a, b in a.fertig != b.fertig ? !a.fertig : a.id < b.id }
     }
 
     /// Die Auskunft fuer `awbmac-ctl agents`, solange die Uebersicht steht.
@@ -109,6 +143,10 @@ enum WeltenUebersichtWorte {
             },
             "ticketsOffen": offeneTickets(w).prefix(5).map(\.titel),
             "kanal": w.kanal.suffix(3).map(\.id),
+            // tickets4: Triage, Vorhaben und die Ticketgruende unter „Braucht dich".
+            "triage": triage(w).prefix(5).map(\.id),
+            "brauchtDichTickets": brauchtDich(w).filter { $0.ziel.hasPrefix("ticket:") }.map { ["id": String($0.ziel.dropFirst(7)), "text": $0.text] },
+            "vorhaben": vorhaben(w).map { ["id": $0.id, "titel": $0.titel, "text": $0.text, "stand": $0.stand, "fertig": $0.fertig] },
         ]
     }
 }
@@ -423,6 +461,10 @@ struct WeltenUebersicht: View {
                     let brauchen = WeltenUebersichtWorte.brauchtDich(welt)
                     if !brauchen.isEmpty { brauchtDich(brauchen) }
                     if !welt.agenten.isEmpty { agenten }
+                    let vorhaben = WeltenUebersichtWorte.vorhaben(welt)
+                    if !vorhaben.isEmpty { vorhabenKarte(vorhaben) }
+                    let backlog = WeltenUebersichtWorte.triage(welt)
+                    if !backlog.isEmpty { triageKarte(backlog) }
                     tickets
                     if !welt.kanal.isEmpty { kanal }
                 }
@@ -433,9 +475,6 @@ struct WeltenUebersicht: View {
         }
         .background(Color(nsColor: .textBackgroundColor))
         .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
-        .sheet(item: $zustand.neuesTicket) { e in
-            WeltenTicketFormular(welt: welt, entwurf: e, zustand: zustand)
-        }
         .accessibilityIdentifier("welten-uebersicht")
     }
 
@@ -452,6 +491,9 @@ struct WeltenUebersicht: View {
             }
             Spacer(minLength: 12)
             Button {
+                // Das Formular steht im Reiter Tickets (tickets4); die Uebersicht fuehrt dorthin.
+                zustand.waehlen(WeltenZustand.kanal, welt)
+                zustand.reiter = .tickets
                 zustand.neuesTicket = WeltenZustand.TicketEntwurf()
             } label: {
                 Label("Neues Ticket", systemImage: "ticket")
@@ -530,8 +572,12 @@ struct WeltenUebersicht: View {
                             }
                             Spacer(minLength: 8)
                             Button(e.knopf) {
-                                zustand.waehlen(e.ziel, welt)
-                                zustand.reiter = .chat
+                                if e.ziel.hasPrefix("ticket:") {
+                                    zustand.ticketAuswahl = String(e.ziel.dropFirst(7))
+                                } else {
+                                    zustand.waehlen(e.ziel, welt)
+                                    zustand.reiter = .chat
+                                }
                             }
                         }
                         .accessibilityElement(children: .combine)
@@ -696,6 +742,69 @@ struct WeltenUebersicht: View {
                 }
                 if offen.count > 5 {
                     Text("und \(offen.count - 5) weitere unter „Alle Tickets“").font(.caption).foregroundStyle(.secondary).padding(.top, 8)
+                }
+            }
+            .weltenKarte()
+        }
+    }
+
+    /// Die Vorhaben mit Fortschritt (Plan Sätze 42 und 51); ein abgeschlossenes steht markiert da.
+    private func vorhabenKarte(_ liste: [WeltenUebersichtWorte.VorhabenStand]) -> some View {
+        abschnitt("Vorhaben", zahl: liste.count) {
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(Array(liste.enumerated()), id: \.element.id) { i, v in
+                    if i > 0 { Divider().padding(.vertical, 6) }
+                    Button { zustand.ticketAuswahl = v.id } label: {
+                        HStack(alignment: .firstTextBaseline, spacing: 10) {
+                            Zustandspunkt(art: WeltenWorte.punkt(ticket: v.stand), basis: 7)
+                            Text(v.titel).lineLimit(1)
+                            if v.fertig { WeltenAbzeichen(text: "abgeschlossen", hervorgehoben: true, hilfe: "Alle Stories abgenommen und das Vorhaben abgenommen") }
+                            Spacer(minLength: 8)
+                            Text(v.text).font(.callout).foregroundStyle(.secondary).lineLimit(1)
+                            Image(systemName: "chevron.right").font(.caption).foregroundStyle(.tertiary)
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Vorhaben \(v.titel), \(v.text), \(v.stand)")
+                    .accessibilityIdentifier("welten-uebersicht-vorhaben-\(v.id)")
+                }
+            }
+            .weltenKarte()
+        }
+    }
+
+    /// Die ersten fünf Tickets des Backlogs in ihrer Reihenfolge (Plan Sätze 39 und 44).
+    private func triageKarte(_ liste: [WeltTicket]) -> some View {
+        abschnitt("Triage", zahl: liste.count, rechts: {
+            Button("Backlog öffnen") {
+                zustand.waehlen(WeltenZustand.kanal, welt)
+                zustand.reiter = .tickets
+                zustand.ticketFilter = "triage"
+            }
+            .buttonStyle(.borderless)
+        }) {
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(Array(liste.prefix(5).enumerated()), id: \.element.id) { i, t in
+                    if i > 0 { Divider().padding(.vertical, 6) }
+                    Button { zustand.ticketAuswahl = t.id } label: {
+                        HStack(alignment: .firstTextBaseline, spacing: 10) {
+                            Text("\(i + 1)").font(.callout.monospacedDigit()).foregroundStyle(.secondary).frame(width: 18, alignment: .trailing)
+                            Text(t.titel).lineLimit(1)
+                            WeltenAbzeichen(text: WeltenWorte.kind(t.kind), hilfe: WeltenWorte.kindErklaerung(t.kind))
+                            Spacer(minLength: 8)
+                            Text("von \(welt.anzeigename(t.absender)) · \(WeltenWorte.alter(t.angelegt))")
+                                .font(.callout).foregroundStyle(.secondary).lineLimit(1)
+                            Image(systemName: "chevron.right").font(.caption).foregroundStyle(.tertiary)
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Triage \(i + 1): \(t.titel)")
+                    .accessibilityIdentifier("welten-uebersicht-triage-\(t.id)")
+                }
+                if liste.count > 5 {
+                    Text("und \(liste.count - 5) weitere im Backlog").font(.caption).foregroundStyle(.secondary).padding(.top, 8)
                 }
             }
             .weltenKarte()

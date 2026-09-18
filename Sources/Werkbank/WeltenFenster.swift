@@ -216,6 +216,33 @@ enum Glasbeleg {
                 malen { teil.draw(in: r, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil) }
             }
         }
+        // EIN OFFENES BLATT (Auftrag tickets4): ein Sheet ist ein eigenes Fenster und steht
+        // deshalb nicht im Sichtbaum des Rahmens. Fuer das Belegbild wird es an seiner Stelle
+        // ueber das Fenster gezeichnet -- sonst zeigte das Bild des Ticketformulars die Liste
+        // darunter. Ohne Sheet aendert sich nichts.
+        if let blatt = fenster.attachedSheet, blatt.isVisible, let brahmen = blatt.contentView?.superview {
+            blatt.displayIfNeeded()
+            brahmen.layoutSubtreeIfNeeded()
+            if let bild = brahmen.bitmapImageRepForCachingDisplay(in: brahmen.bounds),
+               let bctx = NSGraphicsContext(bitmapImageRep: bild) {
+                let vorher = NSGraphicsContext.current
+                NSGraphicsContext.current = bctx
+                erscheinung.performAsCurrentDrawingAppearance {
+                    NSColor.windowBackgroundColor.setFill()
+                    NSRect(x: 0, y: 0, width: bild.pixelsWide, height: bild.pixelsHigh).fill()
+                }
+                NSGraphicsContext.current = vorher
+                brahmen.cacheDisplay(in: brahmen.bounds, to: bild)
+                // Fensterkoordinaten des Sheets, umgerechnet auf den Rahmen des Elternfensters.
+                let s = blatt.frame, f = fenster.frame
+                let ziel = NSRect(x: s.minX - f.minX, y: s.minY - f.minY, width: s.width, height: s.height)
+                malen {
+                    NSColor.black.withAlphaComponent(0.25).setFill()
+                    NSRect(origin: .zero, size: rahmen.bounds.size).fill()
+                    bild.draw(in: ziel, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
+                }
+            }
+        }
         guard let png = rep.representation(using: .png, properties: [:]) else {
             throw NSError(domain: "Werkbank", code: 4, userInfo: [NSLocalizedDescriptionKey: "kein PNG"])
         }

@@ -606,7 +606,10 @@ final class MacSteuerkanal {
             let weltBefehle = ["welt", "waehlen", "klappen", "gespraech", "adressen", "senden", "antworten", "zuruecknehmen", "pause", "stoppen", "umziehen",
                                "bestaetigen", "ticket", "ticketfilter", "ticket-neu", "quittieren", "rueckgabe", "zurueckgeben", "profil",
                                "profil-feld", "gedaechtnis", "gedaechtnis-text", "anlegen", "anlegen-feld", "rechte", "rechte-feld",
-                               "skill-abnehmen", "skill-ablehnen", "skill-zeigen"]
+                               "skill-abnehmen", "skill-ablehnen", "skill-zeigen",
+                               // tickets4: Ansicht, Ticketformular, Handlungen am Ticket, Backlog und die Regeln der Welt
+                               "ticketansicht", "ticket-feld", "ticket-handlung", "ticket-handlung-feld", "ticket-handlung-tun",
+                               "backlog", "regeln", "regel-feld", "zyklus", "dod-sichern", "wip-setzen"]
             guard weltBefehle.contains(was) else {
                 return MacSteuerantwort.fehler("\(befehl) kennt zeigen|schliessen|fenster|schuss|sichtbaum|erscheinung|darstellung|reiter|blatt|inspektor|abbrechen|welt-neu|welt-neu-auf|maschinen|vergessen|\(weltBefehle.joined(separator: "|"))")
             }
@@ -817,10 +820,122 @@ final class MacSteuerkanal {
                 default: return MacSteuerantwort.fehler("\(befehl) rechte-feld werkzeug <Name> an|aus|skill <name> an|aus|bash <muster\\nmuster>")
                 }
             case "ticket-neu":
-                // welten ticket-neu <an|-> <titel | ziel | fertig>
-                let teile = arg.components(separatedBy: " | ")
-                guard teile.count == 3 else { return MacSteuerantwort.fehler("welten ticket-neu <an|-> <titel | ziel | fertig>") }
-                _ = await z.ticketAnlegen(w, WeltenZustand.TicketEntwurf(titel: teile[0], ziel: teile[1], fertig: teile[2], an: wert == "-" ? "" : wert), echt: false)
+                // welten ticket-neu oeffnen|zu|anlegen -- das Formular; sonst der Einzeiler
+                // welten ticket-neu <an|-> <titel | ziel | fertig>.
+                switch wert {
+                case "oeffnen":
+                    z.neuesTicket = WeltenZustand.TicketEntwurf(an: arg == "-" || arg.isEmpty ? "" : arg)
+                case "zu":
+                    z.neuesTicket = nil
+                case "anlegen":
+                    guard let e = z.neuesTicket else { return MacSteuerantwort.fehler("\(befehl) ticket-neu oeffnen zuerst") }
+                    if await z.ticketAnlegen(w, e, echt: false) { z.neuesTicket = nil }
+                default:
+                    let teile = arg.components(separatedBy: " | ")
+                    guard teile.count == 3 else { return MacSteuerantwort.fehler("welten ticket-neu <an|-> <titel | ziel | fertig> oder oeffnen|zu|anlegen") }
+                    _ = await z.ticketAnlegen(w, WeltenZustand.TicketEntwurf(titel: teile[0], ziel: teile[1], fertig: teile[2], an: wert == "-" ? "" : wert), echt: false)
+                }
+
+            // --- tickets4: Ansicht, Formular, Handlungen, Backlog, Weltregeln ----------------
+            case "ticketansicht":
+                guard let a = WeltenZustand.TicketAnsicht(rawValue: wert) else { return MacSteuerantwort.fehler("\(befehl) ticketansicht liste|board") }
+                z.ticketAnsicht = a
+            case "ticket-feld":
+                // welten ticket-feld <feld> <wert>; punkt haengt an, punkt-weg nimmt den letzten.
+                if z.neuesTicket == nil { z.neuesTicket = WeltenZustand.TicketEntwurf() }
+                switch wert {
+                case "titel": z.neuesTicket?.titel = arg
+                case "ziel": z.neuesTicket?.ziel = arg
+                case "fertig": z.neuesTicket?.fertig = arg
+                case "an": z.neuesTicket?.an = arg == "-" ? "" : arg
+                case "art": z.neuesTicket?.kind = arg
+                case "prioritaet": z.neuesTicket?.prioritaet = Int(arg) ?? 2
+                case "eltern": z.neuesTicket?.eltern = arg
+                case "abhaengig": z.neuesTicket?.abhaengig = arg.isEmpty ? [] : [arg]
+                case "frist": z.neuesTicket?.frist = arg
+                case "runden": z.neuesTicket?.runden = arg
+                case "punkt": z.neuesTicket?.fertigPunkte.append(arg)
+                case "punkt-weg": if !(z.neuesTicket?.fertigPunkte.isEmpty ?? true) { z.neuesTicket?.fertigPunkte.removeLast() }
+                default: return MacSteuerantwort.fehler("\(befehl) ticket-feld titel|ziel|fertig|an|art|prioritaet|eltern|abhaengig|frist|runden|punkt|punkt-weg <wert>")
+                }
+            case "ticket-handlung":
+                // welten ticket-handlung <handlung> <ticket>; `zu` schliesst sie.
+                if wert == "zu" {
+                    z.handlungSchliessen()
+                } else {
+                    guard let h = WeltenZustand.TicketHandlung(rawValue: wert) else {
+                        // Abnehmen fehlt mit Absicht: der Mensch nimmt nicht ab (Plan Satz 27).
+                        return MacSteuerantwort.fehler("\(befehl) ticket-handlung rueckgabe|verwerfen|annehmen|umadressieren|grenzen|pruefer <ticket>|zu (abnehmen darf der Mensch nicht)")
+                    }
+                    guard let t = w.ticket(arg) else { return MacSteuerantwort.fehler("kein Ticket \(arg)") }
+                    z.reiter = .tickets
+                    z.ticketAuswahl = t.id
+                    z.handlungOeffnen(h, t, welt: w)
+                }
+            case "ticket-handlung-feld":
+                guard z.ticketHandlung != nil else { return MacSteuerantwort.fehler("keine Handlung offen (\(befehl) ticket-handlung <handlung> <ticket>)") }
+                switch wert {
+                case "grund": z.ticketHandlung?.grund = arg
+                case "bemerkung": z.ticketHandlung?.bemerkung = arg
+                case "duplikat": z.ticketHandlung?.duplikat = arg
+                case "an": z.ticketHandlung?.an = arg
+                case "pruefer": z.ticketHandlung?.pruefer = arg
+                case "art": z.ticketHandlung?.kind = arg
+                case "prioritaet": z.ticketHandlung?.prioritaet = Int(arg) ?? 2
+                case "punkt": z.ticketHandlung?.fertigPunkte.append(arg)
+                case "frist": z.ticketHandlung?.frist = arg
+                case "runden": z.ticketHandlung?.runden = arg
+                default: return MacSteuerantwort.fehler("\(befehl) ticket-handlung-feld grund|bemerkung|duplikat|an|pruefer|art|prioritaet|punkt|frist|runden <wert>")
+                }
+            case "ticket-handlung-tun":
+                guard let e = z.ticketHandlung else {
+                    guard z.rueckgabeOffen != nil else { return MacSteuerantwort.fehler("keine Handlung offen") }
+                    await z.zurueckgeben(w, ticket: z.rueckgabeOffen ?? "", echt: false)
+                    return auskunft()
+                }
+                switch e.handlung {
+                case .rueckgabe: await z.zurueckgeben(w, ticket: e.ticket, echt: false)
+                case .verwerfen: await z.verwerfen(w, echt: false)
+                case .annehmen: await z.annehmen(w, echt: false)
+                case .umadressieren: await z.umadressieren(w, echt: false)
+                case .grenzen: await z.grenzenSetzen(w, echt: false)
+                case .pruefer: await z.prueferSetzen(w, echt: false)
+                }
+            case "backlog":
+                // welten backlog ordnen <id,id,…> | schieben <ticket> <+n|-n>
+                switch wert {
+                case "ordnen":
+                    let reihe = arg.split(whereSeparator: { $0 == "," || $0 == " " }).map(String.init)
+                    guard !reihe.isEmpty else { return MacSteuerantwort.fehler("\(befehl) backlog ordnen <id,id,…>") }
+                    await z.backlogOrdnen(w, reihe: reihe, echt: false)
+                case "schieben":
+                    let teile = arg.split(separator: " ").map(String.init)
+                    guard teile.count == 2, let n = Int(teile[1]) else { return MacSteuerantwort.fehler("\(befehl) backlog schieben <ticket> <+n|-n>") }
+                    await z.backlogSchieben(w, ticket: teile[0], schritte: n, echt: false)
+                default: return MacSteuerantwort.fehler("\(befehl) backlog ordnen|schieben")
+                }
+            case "regeln":
+                switch wert {
+                case "bearbeiten": z.regelnOeffnen(w)
+                case "abbrechen": z.weltRegeln = nil
+                default: return MacSteuerantwort.fehler("\(befehl) regeln bearbeiten|abbrechen")
+                }
+            case "regel-feld":
+                guard z.weltRegeln != nil else { return MacSteuerantwort.fehler("keine Weltregeln in Bearbeitung (\(befehl) regeln bearbeiten)") }
+                switch wert {
+                case "tage": z.weltRegeln?.zyklusTage = arg
+                case "ziel": z.weltRegeln?.zyklusZiel = arg
+                case "wip": z.weltRegeln?.wip = arg
+                case "dod": z.weltRegeln?.dod = arg.isEmpty ? [] : arg.components(separatedBy: " | ")
+                default: return MacSteuerantwort.fehler("\(befehl) regel-feld tage|ziel|wip|dod <wert>")
+                }
+            case "zyklus":
+                guard wert == "ein" || wert == "aus" else { return MacSteuerantwort.fehler("\(befehl) zyklus ein|aus") }
+                await z.zyklusSetzen(w, an: wert == "ein", echt: false)
+            case "dod-sichern":
+                await z.dodSichern(w, echt: false)
+            case "wip-setzen":
+                await z.wipSetzen(w, echt: false)
             default:
                 return MacSteuerantwort.fehler("\(befehl) kennt \(was) nicht")
             }

@@ -56,9 +56,39 @@ final class WeltenZustand {
         let handlung: String; let daten: [String: String]; let text: String; let warnungen: [String]; let echt: Bool
         var id: String { handlung + (daten["agent"] ?? "") + (daten["frage"] ?? "") }
     }
+    /// Das Formular für ein neues Ticket (Auftrag tickets4 C): Auftrag, Art, Priorität,
+    /// Adressat, Eltern, Abhängigkeiten und Grenzen. Leere Felder heissen „Vorgabe des Kerns".
     struct TicketEntwurf: Identifiable, Equatable {
         var titel = "", ziel = "", fertig = "", an = ""
+        var kind = "auftrag"
+        var prioritaet = 2
+        var fertigPunkte: [String] = []
+        var eltern = ""
+        var abhaengig: [String] = []
+        var frist = "", runden = ""
         let id = UUID()
+    }
+    /// Die Handlung, die im Ticketdetail gerade offen steht; nur eine zur Zeit.
+    enum TicketHandlung: String, CaseIterable, Equatable, Sendable {
+        case rueckgabe, verwerfen, annehmen, umadressieren, grenzen, pruefer
+    }
+    /// Die Felder aller Detail-Handlungen an einem Ticket; sie leeren sich mit dem Schliessen.
+    struct TicketHandlungEntwurf: Equatable {
+        var ticket = ""
+        var handlung: TicketHandlung = .rueckgabe
+        var grund = "", bemerkung = "", duplikat = ""
+        var an = "", pruefer = ""
+        var kind = "auftrag"
+        var prioritaet = 2
+        var fertigPunkte: [String] = []
+        var frist = "", runden = ""
+    }
+    /// Zyklus, Definition of Done und WIP-Grenze der Welt im Inspektor (Auftrag tickets4 D).
+    struct WeltRegelEntwurf: Equatable {
+        var welt = ""
+        var zyklusTage = "", zyklusZiel = ""
+        var dod: [String] = []
+        var wip = ""
     }
 
     static let kanal = "kanal"
@@ -89,8 +119,20 @@ final class WeltenZustand {
             reiter = .tickets
         }
     }
-    /// `offen` (alles ausser abgenommen und verworfen), `alle` oder ein Stand.
+    /// `offen` (alles ausser abgenommen und verworfen), `alle`, `triage` oder ein Stand.
     var ticketFilter = "offen"
+    /// Liste oder Board (Plan Satz 47). Das Board zeigt die Stände als Spalten, je Vorhaben eine Swimlane.
+    enum TicketAnsicht: String, CaseIterable, Sendable {
+        case liste, board
+        var titel: String { self == .liste ? "Liste" : "Board" }
+    }
+    var ticketAnsicht: TicketAnsicht = .liste
+    /// Die offene Handlung im Ticketdetail (Verwerfen, Annehmen, Umadressieren, Grenzen, Prüfer, Abnehmen).
+    var ticketHandlung: TicketHandlungEntwurf?
+    /// Die Regeln der Welt in Bearbeitung (Zyklus, Definition of Done, WIP-Grenze).
+    var weltRegeln: WeltRegelEntwurf?
+    /// Das Ticket, das gerade in der Triage gezogen wird (Backlog-Reihenfolge, Satz 44).
+    var backlogZieht: String?
     var entwuerfe: [String: String] = [:]
     var adressfeld = ""
     var antwortEntwuerfe: [String: String] = [:]
@@ -325,8 +367,96 @@ final class WeltenZustand {
         case "offen": gefiltert = basis.filter { !["abgenommen", "verworfen"].contains($0.stand) }
         default: gefiltert = basis.filter { $0.stand == ticketFilter }
         }
-        // Juengste Aenderung zuerst; bei gleicher Sekunde entscheidet die Kennung, damit nichts springt.
+        // Die Triage ist das geordnete Backlog (Plan Satz 44): sie steht in ihrer Reihenfolge,
+        // nicht nach Aenderung. Alles andere: juengste Aenderung zuerst; bei gleicher Sekunde
+        // entscheidet die Kennung, damit nichts springt.
+        if ticketFilter == "triage" { return Self.backlogFolge(gefiltert) }
         return gefiltert.sorted { $0.geaendert != $1.geaendert ? $0.geaendert > $1.geaendert : $0.id < $1.id }
+    }
+
+    /// Die Triage in Backlog-Reihenfolge: `order` aufsteigend, ohne Feld ans Ende, dann Anlagezeit.
+    nonisolated static func backlogFolge(_ tickets: [WeltTicket]) -> [WeltTicket] {
+        tickets.sorted { a, b in
+            let x = a.ordnung ?? Int.max, y = b.ordnung ?? Int.max
+            if x != y { return x < y }
+            if a.angelegt != b.angelegt { return a.angelegt < b.angelegt }
+            return a.id < b.id
+        }
+    }
+
+    /// Die Tickets der Welt in der Triage, in Backlog-Reihenfolge (fuer den Reiter und die Uebersicht).
+    nonisolated static func backlog(_ w: Welt) -> [WeltTicket] {
+        backlogFolge(w.tickets.filter { $0.stand == "triage" })
+    }
+
+    // --- Das Board (Plan Satz 47) ----------------------------------------------------
+
+    /// Eine Swimlane des Boards: ein Vorhaben mit seinen Tickets, zuletzt „Ohne Vorhaben".
+    struct BoardSpur: Identifiable, Equatable {
+        let id: String
+        let titel: String
+        /// Je Spalte des Boards die Tickets dieser Spur, in derselben Reihenfolge wie `boardSpalten`.
+        let spalten: [[WeltTicket]]
+    }
+
+    /// Das Board einer Welt: Spalten in Bearbeitungsrichtung, je Vorhaben eine Swimlane.
+    /// Ein Ticket gehoert zu dem Vorhaben an der Wurzel seiner Elternkette; Tickets ohne
+    /// Vorhaben liegen in „Ohne Vorhaben" (AGIL Abschnitt 5).
+    nonisolated static func board(_ w: Welt, tickets: [WeltTicket]) -> [BoardSpur] {
+        let nachId = Dictionary(w.tickets.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        func vorhaben(_ t: WeltTicket) -> WeltTicket? {
+            if t.kind == "vorhaben" { return t }
+            var jetzt = t
+            var tiefe = 0
+            while let eltern = jetzt.eltern, let naechst = nachId[eltern], tiefe < 5 {
+                if naechst.kind == "vorhaben" { return naechst }
+                jetzt = naechst
+                tiefe += 1
+            }
+            return nil
+        }
+        var folge: [String] = []
+        var gruppen: [String: [WeltTicket]] = [:]
+        for t in tickets {
+            let schluessel = vorhaben(t)?.id ?? ""
+            if gruppen[schluessel] == nil { folge.append(schluessel) }
+            gruppen[schluessel, default: []].append(t)
+        }
+        // Vorhaben zuerst in der Reihenfolge ihres Auftretens, „Ohne Vorhaben" zuletzt.
+        folge = folge.filter { !$0.isEmpty } + (gruppen[""] != nil ? [""] : [])
+        return folge.map { schluessel in
+            let inhalt = gruppen[schluessel] ?? []
+            let spalten = WeltenWorte.boardSpalten.map { spalte -> [WeltTicket] in
+                let staende = WeltenWorte.boardStaende(spalte)
+                let drin = inhalt.filter { staende.contains($0.stand) }
+                return spalte == "triage" ? backlogFolge(drin)
+                    : drin.sorted { $0.prioritaet != $1.prioritaet ? $0.prioritaet < $1.prioritaet : $0.id < $1.id }
+            }
+            let titel = schluessel.isEmpty ? "Ohne Vorhaben" : (nachId[schluessel]?.titel ?? schluessel)
+            return BoardSpur(id: schluessel.isEmpty ? "ohne-vorhaben" : schluessel, titel: titel, spalten: spalten)
+        }
+    }
+
+    /// Was am Kopf der Spalte „läuft" steht (Satz 48): „3 von 4", rot bei Überschreitung.
+    nonisolated static func wipText(_ w: Welt) -> (text: String, rot: Bool) {
+        ("\(w.wip.laufend) von \(w.wip.grenze)", w.wip.grenze > 0 && w.wip.laufend > w.wip.grenze)
+    }
+
+    /// WELCHE HANDLUNGEN DER KERN DEM MENSCHEN AN DIESEM TICKET ERLAUBT (docs/AGENTS-DATEN.md,
+    /// Plan Sätze 22, 23, 25, 27, 31, 39). Was er nicht erlaubt, bietet die Ansicht nicht an:
+    /// Parken, Zwischenstand, Haken und Prüfnotiz gehören dem Bearbeiter beziehungsweise dem
+    /// Prüfer, „braucht dich" setzt nur der Hauptagent über seinen Zug.
+    nonisolated static func moeglicheHandlungen(_ t: WeltTicket) -> [TicketHandlung] {
+        var raus: [TicketHandlung] = []
+        if t.stand == "triage" { raus.append(.annehmen) }
+        if t.stand != "abgenommen" { raus.append(.verwerfen) }
+        raus.append(.umadressieren)
+        if !["abgenommen", "verworfen"].contains(t.stand) { raus.append(.grenzen) }
+        // Abnehmen steht dem Menschen NICHT offen (Hausregel vom 11.09.2026, Plan Satz 27:
+        // „der Nutzer nimmt nicht ab“). Abgenommen wird vom Hauptagenten oder vom Teamleiter des
+        // Teams; der Mensch kann ein abgenommenes Ticket zurueckgeben.
+        if t.stand == "zur Abnahme" { raus.append(.pruefer) }
+        return raus
     }
 
     // --- Handlungen ----------------------------------------------------------------
@@ -441,6 +571,8 @@ final class WeltenZustand {
         guard let rf = rueckfrage else { return }
         rueckfrage = nil
         let r = await handlungAntwort(rf.handlung, rf.daten, echt: rf.echt, bestaetigt: true)
+        // Eine bestaetigte Ticket-Handlung schliesst ihr Formular im Detail.
+        if r.ok, rf.handlung.hasPrefix("ticket_") { handlungSchliessen() }
         // Nach einem Umzug heisst die Welt `<maschine>:<ablage>`; die Ansicht bleibt bei ihr.
         if rf.handlung == "umziehen", r.ok, !r.pfad.isEmpty { weltGewechselt(r.pfad) }
     }
@@ -551,9 +683,151 @@ final class WeltenZustand {
     }
 
     func ticketAnlegen(_ w: Welt, _ e: TicketEntwurf, echt: Bool) async -> Bool {
-        var d: [String: Any] = ["welt": w.pfad, "titel": e.titel, "ziel": e.ziel, "fertig": e.fertig]
+        var d: [String: Any] = ["welt": w.pfad, "titel": e.titel, "ziel": e.ziel, "fertig": e.fertig,
+                                "art": e.kind, "prioritaet": e.prioritaet]
         if !e.an.isEmpty { d["an"] = [e.an] }
+        let punkte = e.fertigPunkte.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+        if !punkte.isEmpty { d["fertig_punkte"] = punkte }
+        if !e.eltern.isEmpty { d["eltern"] = e.eltern }
+        if !e.abhaengig.isEmpty { d["abhaengig"] = e.abhaengig }
+        if !e.frist.isEmpty { d["frist"] = e.frist }
+        if !e.runden.isEmpty { d["runden"] = e.runden }
         return await ausfuehren("ticket", d, echt: echt)
+    }
+
+    // --- tickets4: die Handlungen des Menschen am Ticket -------------------------------
+
+    /// Eine Handlung im Detail öffnen; die Felder stehen mit den Vorgaben des Tickets da.
+    func handlungOeffnen(_ handlung: TicketHandlung, _ t: WeltTicket, welt w: Welt) {
+        var e = TicketHandlungEntwurf(ticket: t.id, handlung: handlung)
+        switch handlung {
+        case .rueckgabe:
+            rueckgabeOffen = t.id
+            rueckgabeText = ""
+            ticketHandlung = nil
+            return
+        case .verwerfen: e.grund = "nicht-mehr-noetig"
+        case .annehmen:
+            e.kind = t.kind
+            e.prioritaet = t.prioritaet
+            e.an = w.hauptagent ?? ""
+        case .umadressieren: e.an = t.bearbeiter ?? t.adressaten.first ?? (w.hauptagent ?? "")
+        case .grenzen:
+            e.frist = t.grenzen["frist"] ?? ""
+            e.runden = t.grenzen["runden"] ?? ""
+        case .pruefer: e.pruefer = w.agenten.first { $0.id != t.bearbeiter && $0.stand == "aktiv" }?.id ?? ""
+        }
+        rueckgabeOffen = nil
+        ticketHandlung = e
+    }
+
+    func handlungSchliessen() {
+        ticketHandlung = nil
+        rueckgabeOffen = nil
+        rueckgabeText = ""
+    }
+
+    /// Ein Ticket verwerfen (Satz 22 und 40): Grundcode Pflicht, bei `duplikat` der Verweis.
+    func verwerfen(_ w: Welt, echt: Bool) async {
+        guard let e = ticketHandlung, e.handlung == .verwerfen else { return }
+        var d: [String: Any] = ["welt": w.pfad, "ticket": e.ticket, "grund": e.grund]
+        let bemerkung = e.bemerkung.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !bemerkung.isEmpty { d["bemerkung"] = bemerkung }
+        if !e.duplikat.isEmpty { d["duplikat_von"] = e.duplikat }
+        if await ausfuehren("ticket_verwerfen", d, echt: echt) { handlungSchliessen() }
+    }
+
+    /// Ein Triage-Ticket annehmen (Satz 39): Adressat, Priorität, Art, Fertig-Punkte.
+    func annehmen(_ w: Welt, echt: Bool) async {
+        guard let e = ticketHandlung, e.handlung == .annehmen else { return }
+        var d: [String: Any] = ["welt": w.pfad, "ticket": e.ticket, "an": [e.an],
+                                "prioritaet": e.prioritaet, "art": e.kind]
+        let punkte = e.fertigPunkte.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+        if !punkte.isEmpty { d["fertig_punkte"] = punkte }
+        if await ausfuehren("ticket_annehmen", d, echt: echt) { handlungSchliessen() }
+    }
+
+    /// Ein Ticket umadressieren (Satz 23): neue Adressaten mit Grund.
+    func umadressieren(_ w: Welt, echt: Bool) async {
+        guard let e = ticketHandlung, e.handlung == .umadressieren else { return }
+        let grund = e.grund.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !grund.isEmpty else {
+            meldung = Meldung(text: "Umadressieren braucht einen Grund.", ok: false)
+            return
+        }
+        if await ausfuehren("ticket_umadressieren", ["welt": w.pfad, "ticket": e.ticket, "an": [e.an], "grund": grund], echt: echt) {
+            handlungSchliessen()
+        }
+    }
+
+    /// Frist und Rundenzahl eines Tickets setzen (Sätze 6 und 31).
+    func grenzenSetzen(_ w: Welt, echt: Bool) async {
+        guard let e = ticketHandlung, e.handlung == .grenzen else { return }
+        var d: [String: Any] = ["welt": w.pfad, "ticket": e.ticket]
+        if !e.frist.isEmpty { d["frist"] = e.frist }
+        if !e.runden.isEmpty { d["runden"] = e.runden }
+        if await ausfuehren("ticket_grenzen", d, echt: echt) { handlungSchliessen() }
+    }
+
+    /// Den Prüfer eines Ergebnisses setzen (Sätze 25 und 26).
+    func prueferSetzen(_ w: Welt, echt: Bool) async {
+        guard let e = ticketHandlung, e.handlung == .pruefer else { return }
+        if await ausfuehren("ticket_pruefen", ["welt": w.pfad, "ticket": e.ticket, "pruefer": e.pruefer], echt: echt) {
+            handlungSchliessen()
+        }
+    }
+
+    /// Die Backlog-Reihenfolge der Triage setzen (Satz 44); `reihe` ist die ganze Liste, oben zuerst.
+    @discardableResult
+    func backlogOrdnen(_ w: Welt, reihe: [String], echt: Bool) async -> Bool {
+        guard !reihe.isEmpty else { return false }
+        return await ausfuehren("backlog", ["welt": w.pfad, "ordnen": reihe], echt: echt)
+    }
+
+    /// Ein Triage-Ticket um `schritte` verschieben (Pfeiltasten und der Steuerkanal).
+    @discardableResult
+    func backlogSchieben(_ w: Welt, ticket: String, schritte: Int, echt: Bool) async -> Bool {
+        var reihe = Self.backlog(w).map(\.id)
+        guard let jetzt = reihe.firstIndex(of: ticket) else {
+            meldung = Meldung(text: "„\(ticket)“ steht nicht in der Triage.", ok: false)
+            return false
+        }
+        let ziel = max(0, min(reihe.count - 1, jetzt + schritte))
+        guard ziel != jetzt else { return false }
+        reihe.remove(at: jetzt)
+        reihe.insert(ticket, at: ziel)
+        return await backlogOrdnen(w, reihe: reihe, echt: echt)
+    }
+
+    // --- tickets4: Zyklus, Definition of Done und WIP-Grenze der Welt ------------------
+
+    func regelnOeffnen(_ w: Welt) {
+        weltRegeln = WeltRegelEntwurf(welt: w.pfad, zyklusTage: w.zyklus.tage > 0 ? "\(w.zyklus.tage)" : "7",
+                                      zyklusZiel: w.zyklus.jetzt?.ziel ?? "", dod: w.dod,
+                                      wip: w.wip.grenze > 0 ? "\(w.wip.grenze)" : "")
+    }
+
+    func zyklusSetzen(_ w: Welt, an: Bool, echt: Bool) async {
+        var d: [String: Any] = ["welt": w.pfad, "aktion": an ? "einschalten" : "ausschalten"]
+        if an, let e = weltRegeln {
+            if !e.zyklusTage.isEmpty { d["tage"] = e.zyklusTage }
+            let ziel = e.zyklusZiel.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !ziel.isEmpty { d["ziel"] = ziel }
+        }
+        _ = await ausfuehren("zyklus", d, echt: echt)
+    }
+
+    func dodSichern(_ w: Welt, echt: Bool) async {
+        guard let e = weltRegeln else { return }
+        let punkte = e.dod.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+        if await ausfuehren("dod", ["welt": w.pfad, "punkte": punkte], echt: echt) {
+            weltRegeln?.dod = punkte
+        }
+    }
+
+    func wipSetzen(_ w: Welt, echt: Bool) async {
+        guard let e = weltRegeln else { return }
+        _ = await ausfuehren("wip", ["welt": w.pfad, "limit": e.wip], echt: echt)
     }
 
     // --- Welt und Agent anlegen (Auftrag agentsux Nr. 1) ------------------------------
@@ -978,11 +1252,12 @@ struct WeltenZaehler: View {
     @Bindable var zustand: WeltenZustand
 
     var body: some View {
+        // Plan Satz 35: „braucht dich", Triage, laufende und offene Tickets getrennt.
         let w = kern.welten.flatMap { zustand.welt($0) }
-        Text(w.map(WeltenWorte.zaehler) ?? "")
+        Text(w.map(WeltenWorte.zaehlerGetrennt) ?? "")
             .font(.callout).monospacedDigit().foregroundStyle(.secondary)
             .fixedSize()
-            .accessibilityLabel(w.map { "Welt \($0.name): \(WeltenWorte.zaehler($0))" } ?? "Keine Welt")
+            .accessibilityLabel(w.map { "Welt \($0.name): \(WeltenWorte.zaehlerGetrennt($0))" } ?? "Keine Welt")
             .accessibilityIdentifier("welten-zaehler")
     }
 }
@@ -1722,12 +1997,51 @@ struct FlussLayout: Layout {
 
 // MARK: Tickets
 
+/// EIN ABZEICHEN an der Ticketkarte: Art, Priorität, Frist-Ampel. Neben jeder Farbe steht
+/// ein Wort (Hausregel), und die Fläche kommt aus der Systemfarbe, nicht aus eigenen Tokens.
+struct WeltenAbzeichen: View {
+    let text: String
+    var hervorgehoben = false
+    var hilfe: String = ""
+
+    var body: some View {
+        Text(text)
+            .font(.caption.weight(hervorgehoben ? .semibold : .regular))
+            .padding(.horizontal, 6).padding(.vertical, 2)
+            .background(RoundedRectangle(cornerRadius: 5).fill(hervorgehoben ? Color.accentColor.opacity(0.16) : Color.secondary.opacity(0.12)))
+            .foregroundStyle(hervorgehoben ? Color.accentColor : Color.secondary)
+            .help(hilfe.isEmpty ? text : hilfe)
+            .accessibilityLabel(hilfe.isEmpty ? text : "\(text), \(hilfe)")
+    }
+}
+
+/// Die Frist-Ampel (Plan Satz 31): Punkt und Wort, grau, gelb ab einem Tag vorher, rot ab Ablauf.
+struct WeltenAmpel: View {
+    let stand: String
+    let frist: String
+
+    var body: some View {
+        if !stand.isEmpty {
+            HStack(spacing: 4) {
+                Zustandspunkt(art: WeltenWorte.ampelPunkt(stand), basis: 7)
+                Text(WeltenWorte.ampel(stand)).font(.caption)
+            }
+            .foregroundStyle(stand == "rot" ? Color.orange : Color.secondary)
+            .help(frist.isEmpty ? WeltenWorte.ampel(stand) : "\(WeltenWorte.ampel(stand)): \(AgentsWorte.uhrzeit(frist))")
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel(WeltenWorte.ampel(stand))
+        }
+    }
+}
+
 struct WeltenTickets: View {
     let welt: Welt
     @Bindable var zustand: WeltenZustand
 
     var body: some View {
-        if let t = welt.ticket(zustand.ticketAuswahl) {
+        // Ein offenes Formular hat Vorrang vor dem Detail: „Neues Ticket" fuehrt immer in die
+        // Liste mit dem Formular darueber, gleich woher der Klick kam.
+        if let t = welt.ticket(zustand.ticketAuswahl), zustand.neuesTicket == nil {
             WeltenTicketDetail(ticket: t, welt: welt, zustand: zustand)
         } else {
             liste
@@ -1737,89 +2051,304 @@ struct WeltenTickets: View {
     private var liste: some View {
         let tickets = zustand.tickets(welt)
         return VStack(spacing: 0) {
-            HStack(spacing: 10) {
-                Picker("Stand", selection: $zustand.ticketFilter) {
-                    Text("Offen").tag("offen")
-                    Text("Alle").tag("alle")
-                    Divider()
-                    ForEach(WeltenWorte.ticketStaende, id: \.self) { Text($0).tag($0) }
-                }
-                .fixedSize()
-                .accessibilityIdentifier("welten-ticketfilter")
-                Text(tickets.count == 1 ? "1 Ticket" : "\(tickets.count) Tickets").font(.callout).foregroundStyle(.secondary)
-                Spacer()
-                Button {
-                    zustand.neuesTicket = WeltenZustand.TicketEntwurf(an: zustand.agentId ?? "")
-                } label: {
-                    Label("Neues Ticket", systemImage: "plus")
-                }
-                .accessibilityIdentifier("welten-neues-ticket")
+            kopf(tickets.count)
+            // Das Formular steht IM Blatt, nicht in einem Sheet: so bleibt die Liste daneben
+            // lesbar, und ein Belegbild des Fensters zeigt es mit (Auftrag tickets4 F).
+            if let e = zustand.neuesTicket {
+                WeltenTicketFormular(welt: welt, entwurf: e, zustand: zustand)
+                    .frame(maxWidth: 900)
+                    .frame(maxWidth: .infinity)
+                    .padding(.horizontal, 16)
+                Divider()
             }
-            .padding(.horizontal, 16).padding(.vertical, 8)
-            ScrollView {
-                LazyVStack(spacing: 8) {
-                    if tickets.isEmpty {
-                        ContentUnavailableView {
-                            Label("Keine Tickets", systemImage: "ticket")
-                        } description: {
-                            Text(zustand.ticketFilter == "offen" ? "Nichts offen. „Alle“ zeigt auch abgenommene Tickets." : "Kein Ticket in diesem Stand.")
+            if zustand.ticketAnsicht == .board {
+                WeltenTicketBoard(welt: welt, tickets: tickets, zustand: zustand)
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 8) {
+                        if tickets.isEmpty { leer }
+                        ForEach(tickets) { t in
+                            zeile(t, alle: tickets)
                         }
-                        .padding(.top, 30)
                     }
-                    ForEach(tickets) { t in
-                        Button { zustand.ticketAuswahl = t.id } label: { karte(t) }
-                            .buttonStyle(.plain)
-                    }
+                    .padding(.horizontal, 16).padding(.bottom, 16)
+                    .frame(maxWidth: 900)
+                    .frame(maxWidth: .infinity)
                 }
-                .padding(.horizontal, 16).padding(.bottom, 16)
-                .frame(maxWidth: 860)
-                .frame(maxWidth: .infinity)
             }
-        }
-        .sheet(item: $zustand.neuesTicket) { e in
-            WeltenTicketFormular(welt: welt, entwurf: e, zustand: zustand)
         }
     }
 
-    private func karte(_ t: WeltTicket) -> some View {
-        let adressat = t.bearbeiter ?? t.adressaten.first
-        return HStack(spacing: 12) {
-            if let a = welt.agent(adressat) {
+    private func kopf(_ anzahl: Int) -> some View {
+        HStack(spacing: 10) {
+            Picker("Stand", selection: $zustand.ticketFilter) {
+                Text("Offen").tag("offen")
+                Text("Alle").tag("alle")
+                Text("Triage").tag("triage")
+                Divider()
+                ForEach(WeltenWorte.ticketStaende, id: \.self) { Text($0).tag($0) }
+            }
+            .fixedSize()
+            .accessibilityIdentifier("welten-ticketfilter")
+            Picker("Ansicht", selection: $zustand.ticketAnsicht) {
+                ForEach(WeltenZustand.TicketAnsicht.allCases, id: \.self) { Text($0.titel).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            .fixedSize()
+            .accessibilityIdentifier("welten-ticketansicht")
+            Text(anzahl == 1 ? "1 Ticket" : "\(anzahl) Tickets").font(.callout).foregroundStyle(.secondary)
+            Spacer()
+            Button {
+                zustand.neuesTicket = WeltenZustand.TicketEntwurf(an: zustand.agentId ?? "")
+            } label: {
+                Label("Neues Ticket", systemImage: "plus")
+            }
+            .accessibilityIdentifier("welten-neues-ticket")
+        }
+        .padding(.horizontal, 16).padding(.vertical, 8)
+    }
+
+    private var leer: some View {
+        ContentUnavailableView {
+            Label("Keine Tickets", systemImage: "ticket")
+        } description: {
+            switch zustand.ticketFilter {
+            case "offen": Text("Nichts offen. „Alle“ zeigt auch abgenommene Tickets.")
+            case "triage": Text("Das Backlog ist leer. Ein Ticket ohne Adressat landet hier, bis der Hauptagent es annimmt.")
+            default: Text("Kein Ticket in diesem Stand.")
+            }
+        }
+        .padding(.top, 30)
+    }
+
+    /// In der Triage lässt sich die Reihenfolge ziehen (Plan Satz 44); sonst ist die Zeile nur ein Knopf.
+    @ViewBuilder
+    private func zeile(_ t: WeltTicket, alle: [WeltTicket]) -> some View {
+        let karte = Button { zustand.ticketAuswahl = t.id } label: {
+            WeltenTicketKarte(ticket: t, welt: welt, ziehbar: zustand.ticketFilter == "triage")
+        }
+        .buttonStyle(.plain)
+        if zustand.ticketFilter == "triage" {
+            karte
+                .draggable(t.id) { WeltenTicketKarte(ticket: t, welt: welt, ziehbar: true).frame(width: 420) }
+                .dropDestination(for: String.self) { kennungen, _ in
+                    guard let gezogen = kennungen.first, gezogen != t.id else { return false }
+                    var reihe = alle.map(\.id)
+                    guard let von = reihe.firstIndex(of: gezogen), let nach = reihe.firstIndex(of: t.id) else { return false }
+                    reihe.remove(at: von)
+                    reihe.insert(gezogen, at: nach)
+                    Task { await zustand.backlogOrdnen(welt, reihe: reihe, echt: true) }
+                    return true
+                }
+        } else {
+            karte
+        }
+    }
+}
+
+/// EINE TICKETKARTE (Auftrag tickets4 A, Plan Sätze 35, 36, 39, 44, 48): Art, Priorität,
+/// Frist-Ampel, Stand, Alter, Adressat mit Figur, Absender und -- je nach Stand -- die
+/// Weckbedingung, der Grund, der Grundcode, der Verweis oder der Prüfer.
+struct WeltenTicketKarte: View {
+    let ticket: WeltTicket
+    let welt: Welt
+    var ziehbar = false
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            if ziehbar {
+                Image(systemName: "line.3.horizontal").font(.callout).foregroundStyle(.tertiary).frame(width: 14)
+                    .accessibilityHidden(true)
+            }
+            if let a = welt.agent(ticket.bearbeiter ?? ticket.adressaten.first) {
                 WeltenFigur(agent: a, groesse: 32)
             } else {
                 Image(systemName: "person.3").frame(width: 32).foregroundStyle(.secondary)
             }
-            VStack(alignment: .leading, spacing: 3) {
-                Text(t.titel).fontWeight(.semibold).lineLimit(1)
-                Text(ticketZeile(t)).font(.callout).foregroundStyle(.secondary).lineLimit(1)
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text(ticket.titel).fontWeight(.semibold).lineLimit(1)
+                    WeltenAbzeichen(text: WeltenWorte.kind(ticket.kind), hilfe: WeltenWorte.kindErklaerung(ticket.kind))
+                    WeltenAbzeichen(text: WeltenWorte.prioritaet(ticket.prioritaet),
+                                    hervorgehoben: WeltenWorte.prioritaetHervor(ticket.prioritaet),
+                                    hilfe: ticket.prioritaetText.isEmpty ? WeltenWorte.prioritaetText(ticket.prioritaet) : ticket.prioritaetText)
+                    WeltenAmpel(stand: ticket.ampel, frist: ticket.grenzen["frist"] ?? "")
+                }
+                Text(WeltenTicketWorte.zeile(ticket, welt: welt)).font(.callout).foregroundStyle(.secondary).lineLimit(1)
+                if let zusatz = WeltenTicketWorte.standzeile(ticket, welt: welt) {
+                    Text(zusatz).font(.callout).foregroundStyle(.secondary).lineLimit(2).fixedSize(horizontal: false, vertical: true)
+                }
             }
             Spacer(minLength: 8)
-            if !t.wartetAuf.isEmpty {
-                Label("wartet auf \(t.wartetAuf.count)", systemImage: "link").font(.caption).foregroundStyle(.secondary)
+            VStack(alignment: .trailing, spacing: 4) {
+                HStack(spacing: 5) {
+                    Zustandspunkt(art: WeltenWorte.punkt(ticket: ticket.stand))
+                    Text(ticket.stand)
+                }
+                .font(.callout)
+                if !ticket.wartetAuf.isEmpty {
+                    Label("wartet auf \(ticket.wartetAuf.count)", systemImage: "link").font(.caption).foregroundStyle(.secondary)
+                }
             }
-            HStack(spacing: 5) {
-                Zustandspunkt(art: WeltenWorte.punkt(ticket: t.stand))
-                Text(t.stand)
-            }
-            .font(.callout)
-            Image(systemName: "chevron.right").font(.caption).foregroundStyle(.tertiary)
+            Image(systemName: "chevron.right").font(.caption).foregroundStyle(.tertiary).padding(.top, 2)
         }
         .padding(12)
         .contentShape(Rectangle())
         .background(RoundedRectangle(cornerRadius: 10).fill(Color(nsColor: .controlBackgroundColor)))
         .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color(nsColor: .separatorColor)))
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("Ticket \(t.titel), \(t.stand)")
+        .accessibilityLabel(WeltenTicketWorte.vorlesen(ticket, welt: welt))
+        .accessibilityIdentifier("welten-ticket-\(ticket.id)")
+    }
+}
+
+/// Die Sätze der Ticketkarte -- für Bildschirm und Auskunft dieselben.
+enum WeltenTicketWorte {
+    /// Zeile zwei: an wen, von wem, wie alt, und bei Eltern der Kinderzähler.
+    static func zeile(_ t: WeltTicket, welt w: Welt) -> String {
+        var teile: [String] = []
+        let an = t.adressaten.map { w.anzeigename($0) } + (t.team.map { ["Team \(WeltenWorte.team($0))"] } ?? [])
+        if !an.isEmpty { teile.append("an \(an.joined(separator: ", "))") }
+        if let b = t.bearbeiter, !t.adressaten.contains(b) || t.adressaten.count > 1 { teile.append("bearbeitet von \(w.anzeigename(b))") }
+        teile.append("von \(w.anzeigename(t.absender))")
+        teile.append(WeltenWorte.alter(t.angelegt))
+        if t.kinderGesamt > 0 { teile.append("\(t.kinderAbgenommen) von \(t.kinderGesamt) abgenommen") }
+        return teile.joined(separator: " · ")
     }
 
-    private func ticketZeile(_ t: WeltTicket) -> String {
+    /// Zeile drei: was der Stand erklären muss (Auftrag tickets4 A). nil, wenn nichts zu sagen ist.
+    static func standzeile(_ t: WeltTicket, welt w: Welt) -> String? {
         var teile: [String] = []
-        let an = t.adressaten.map { welt.anzeigename($0) } + (t.team.map { ["Team \(WeltenWorte.team($0))"] } ?? [])
-        if !an.isEmpty { teile.append("an \(an.joined(separator: ", "))") }
-        if let b = t.bearbeiter, !t.adressaten.contains(b) || t.adressaten.count > 1 { teile.append("bearbeitet von \(welt.anzeigename(b))") }
-        teile.append("von \(welt.anzeigename(t.absender))")
-        teile.append(WeltenWorte.alter(t.angelegt))
-        return teile.joined(separator: " · ")
+        if t.stand == "wartet", let p = t.geparkt {
+            let weck = p.bis.map { "bis \(AgentsWorte.uhrzeit($0))" } ?? p.auf.map { id in "auf „\(w.ticket(id)?.titel ?? id)“" } ?? "ohne Weckbedingung"
+            teile.append("wartet \(weck)\(p.grund.isEmpty ? "" : ": \(p.grund)")")
+        }
+        if t.stand == "braucht dich", let f = t.flagge {
+            teile.append("braucht dich: \(f.grund.isEmpty ? "ohne Grund" : f.grund)")
+        }
+        if t.stand == "verworfen", let v = t.verworfen {
+            let dup = v.duplikatVon.map { id in " von „\(w.ticket(id)?.titel ?? id)“" } ?? ""
+            teile.append("verworfen: \(WeltenWorte.verwerfGrund(v.code))\(dup)")
+        } else if let d = t.duplikatVon {
+            teile.append("Duplikat von „\(w.ticket(d)?.titel ?? d)“")
+        }
+        if t.stand == "in Prüfung", let r = t.pruefung {
+            teile.append("prüft: \(w.anzeigename(r.pruefer))")
+        }
+        if let e = t.eltern {
+            teile.append("gehört zu „\(w.ticket(e)?.titel ?? e)“ (\(e))")
+        }
+        return teile.isEmpty ? nil : teile.joined(separator: " · ")
+    }
+
+    /// Was VoiceOver von der Karte liest.
+    static func vorlesen(_ t: WeltTicket, welt w: Welt) -> String {
+        var teile = ["Ticket \(t.titel)", WeltenWorte.kind(t.kind), WeltenWorte.prioritaet(t.prioritaet), t.stand]
+        if !t.ampel.isEmpty { teile.append(WeltenWorte.ampel(t.ampel)) }
+        if let z = standzeile(t, welt: w) { teile.append(z) }
+        return teile.joined(separator: ", ")
+    }
+
+    /// Die Messung im Detail (Plan Satz 50): Durchlaufzeit, Züge, Alter.
+    static func messung(_ t: WeltTicket) -> String {
+        ["Durchlaufzeit \(WeltenWorte.dauerWort(t.durchlaufzeit))",
+         t.zuege == 1 ? "1 Zug" : "\(t.zuege) Züge",
+         "Alter \(WeltenWorte.dauerWort(t.alterSekunden))"].joined(separator: " · ")
+    }
+}
+
+/// DAS BOARD (Plan Satz 47): Spalten in Bearbeitungsrichtung, je Vorhaben eine Swimlane,
+/// Zähler am Spaltenkopf und die WIP-Grenze der Welt über „läuft".
+struct WeltenTicketBoard: View {
+    let welt: Welt
+    let tickets: [WeltTicket]
+    @Bindable var zustand: WeltenZustand
+
+    private let spaltenbreite: CGFloat = 220
+
+    var body: some View {
+        let spuren = WeltenZustand.board(welt, tickets: tickets)
+        ScrollView([.horizontal, .vertical]) {
+            VStack(alignment: .leading, spacing: 16) {
+                kopfzeile
+                if spuren.isEmpty {
+                    Text("Kein Ticket in dieser Auswahl.").font(.callout).foregroundStyle(.secondary).padding(.leading, 4)
+                }
+                ForEach(spuren) { spur in
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(spur.titel).font(.headline).accessibilityAddTraits(.isHeader)
+                        HStack(alignment: .top, spacing: 12) {
+                            ForEach(Array(WeltenWorte.boardSpalten.enumerated()), id: \.offset) { i, spalte in
+                                spaltenInhalt(spur.spalten[i], spalte: spalte)
+                            }
+                        }
+                    }
+                    .accessibilityIdentifier("welten-board-spur-\(spur.id)")
+                }
+            }
+            .padding(16)
+        }
+        .accessibilityIdentifier("welten-board")
+    }
+
+    private var kopfzeile: some View {
+        HStack(alignment: .bottom, spacing: 12) {
+            ForEach(WeltenWorte.boardSpalten, id: \.self) { spalte in
+                let anzahl = tickets.filter { WeltenWorte.boardStaende(spalte).contains($0.stand) }.count
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 5) {
+                        Zustandspunkt(art: WeltenWorte.punkt(ticket: spalte), basis: 7)
+                        Text(spalte).font(.callout.weight(.semibold)).lineLimit(1)
+                        Text("\(anzahl)").font(.callout).monospacedDigit().foregroundStyle(.secondary)
+                    }
+                    if spalte == "läuft" {
+                        let w = WeltenZustand.wipText(welt)
+                        Text(w.text)
+                            .font(.caption).monospacedDigit()
+                            .foregroundStyle(w.rot ? Color.orange : Color.secondary)
+                            .help("Weiche WIP-Grenze der Welt: laufende und geparkte Tickets gegen die Grenze")
+                            .accessibilityLabel("WIP-Grenze \(w.text)\(w.rot ? ", überschritten" : "")")
+                            .accessibilityIdentifier("welten-board-wip")
+                    }
+                }
+                .frame(width: spaltenbreite, alignment: .leading)
+            }
+        }
+    }
+
+    private func spaltenInhalt(_ inhalt: [WeltTicket], spalte: String) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ForEach(inhalt) { t in
+                Button { zustand.ticketAuswahl = t.id } label: { kachel(t) }
+                    .buttonStyle(.plain)
+            }
+            if inhalt.isEmpty {
+                Text("–").font(.caption).foregroundStyle(.tertiary).frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .frame(width: spaltenbreite, alignment: .topLeading)
+    }
+
+    private func kachel(_ t: WeltTicket) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(t.titel).font(.callout.weight(.medium)).lineLimit(2).fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 5) {
+                WeltenAbzeichen(text: WeltenWorte.kind(t.kind), hilfe: WeltenWorte.kindErklaerung(t.kind))
+                WeltenAbzeichen(text: WeltenWorte.prioritaet(t.prioritaet), hervorgehoben: WeltenWorte.prioritaetHervor(t.prioritaet),
+                                hilfe: t.prioritaetText.isEmpty ? WeltenWorte.prioritaetText(t.prioritaet) : t.prioritaetText)
+                WeltenAmpel(stand: t.ampel, frist: t.grenzen["frist"] ?? "")
+            }
+            Text(t.bearbeiter.map { welt.anzeigename($0) } ?? t.adressaten.first.map { welt.anzeigename($0) } ?? "ohne Adressat")
+                .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+        }
+        .padding(8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .controlBackgroundColor)))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color(nsColor: .separatorColor)))
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(WeltenTicketWorte.vorlesen(t, welt: welt))
+        .accessibilityIdentifier("welten-board-ticket-\(t.id)")
     }
 }
 
@@ -1833,55 +2362,26 @@ struct WeltenTicketDetail: View {
             VStack(alignment: .leading, spacing: 14) {
                 Button { zustand.ticketAuswahl = nil } label: { Label("Alle Tickets", systemImage: "chevron.left") }
                     .buttonStyle(.borderless)
-                HStack(alignment: .firstTextBaseline, spacing: 10) {
-                    Text(ticket.titel).font(.title2.weight(.semibold))
-                    HStack(spacing: 5) { Zustandspunkt(art: WeltenWorte.punkt(ticket: ticket.stand)); Text(ticket.stand) }.font(.callout)
-                }
+                titelzeile
                 if let v = ticket.skillVorschlag {
                     WeltenSkillVorschlagKarte(ticket: ticket, vorschlag: v, welt: welt, zustand: zustand)
                 }
-                karte("Auftrag") {
-                    // Ein Skill-Vorschlag traegt den Diff auch im Ziel; der steht schon in der Karte darueber.
-                    feld("Ziel", ticket.skillVorschlag == nil ? ticket.ziel : (ticket.ziel.components(separatedBy: "\n\n").first ?? ticket.ziel))
-                    feld("Fertig heißt", ticket.fertig)
-                    feld("Adressiert an", (ticket.adressaten.map { welt.anzeigename($0) } + (ticket.team.map { ["Team \(WeltenWorte.team($0))"] } ?? [])).joined(separator: ", "))
-                    if let b = ticket.bearbeiter { feld("Bearbeiter", welt.anzeigename(b)) }
-                    feld("Absender", welt.anzeigename(ticket.absender))
-                    feld("Angelegt", AgentsWorte.uhrzeit(ticket.angelegt))
-                    if !ticket.abhaengig.isEmpty {
-                        feld("Hängt ab von", ticket.abhaengig.map { id in
-                            let t = welt.ticket(id)
-                            return "„\(t?.titel ?? id)“ (\(t?.stand ?? "unbekannt"))"
-                        }.joined(separator: ", "))
-                    }
-                    if !ticket.grenzen.isEmpty { feld("Grenzen", ticket.grenzen.sorted { $0.key < $1.key }.map { "\($0.key): \($0.value)" }.joined(separator: ", ")) }
-                }
-                if let e = ticket.ergebnis {
-                    karte("Ergebnis") {
-                        Text(e.text).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
-                        Text("\(welt.anzeigename(e.von)) · \(AgentsWorte.uhrzeit(e.zeit))\(e.commit.map { " · Commit \($0)" } ?? "")").font(.callout).foregroundStyle(.secondary)
-                    }
-                }
-                if let a = ticket.abnahme {
-                    karte(ticket.stand == "zurückgegeben" ? "Zurückgegeben" : "Abnahme") {
-                        Text("\(welt.anzeigename(a.von)) · \(AgentsWorte.uhrzeit(a.zeit))").font(.callout)
-                        if let b = a.bemerkung { Text(b).foregroundStyle(.secondary) }
-                        if ticket.stand == "abgenommen" { rueckgabe }
-                    }
-                }
-                karte("Verlauf") {
-                    ForEach(Array(ticket.verlauf.enumerated()), id: \.offset) { _, e in
-                        HStack(alignment: .firstTextBaseline, spacing: 8) {
-                            Text(AgentsWorte.uhrzeit(e.zeit)).font(.callout).monospacedDigit().foregroundStyle(.secondary).frame(width: 90, alignment: .leading)
-                            Text("\(welt.anzeigename(e.von)): \(WeltenWorte.ereignis(e.ereignis))\(e.text.isEmpty ? "" : " -- \(e.text)")").font(.callout)
-                        }
-                    }
-                }
+                auftrag
+                if !ticket.fertigPunkte.isEmpty { fertigListe }
+                if !zwischenstaende.isEmpty { zwischenstandKarte }
+                if let e = ticket.ergebnis { ergebnisKarte(e) }
+                if let r = ticket.pruefung, r.notiz != nil || ticket.stand == "in Prüfung" { pruefKarte(r) }
+                if let a = ticket.abnahme { abnahmeKarte(a) }
+                if let v = ticket.verworfen { verwurfKarte(v) }
+                handlungen
+                messungKarte
+                verlaufKarte
                 let nachrichten = welt.kanal.filter { $0.ticket == ticket.id }
                 if !nachrichten.isEmpty {
                     karte("Im Kanal") {
                         ForEach(nachrichten) { n in
-                            Text("\(welt.anzeigename(n.von)) an \(n.an.map { welt.anzeigename($0) }.joined(separator: ", ")): \(n.text)").font(.callout).fixedSize(horizontal: false, vertical: true)
+                            Text("\(n.id) · \(welt.anzeigename(n.von)) an \(n.an.map { welt.anzeigename($0) }.joined(separator: ", ")): \(n.text)")
+                                .font(.callout).fixedSize(horizontal: false, vertical: true)
                         }
                     }
                 }
@@ -1891,6 +2391,320 @@ struct WeltenTicketDetail: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .accessibilityIdentifier("welten-ticket-detail")
+    }
+
+    // --- Kopf und Auftrag -----------------------------------------------------------
+
+    private var titelzeile: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                Text(ticket.titel).font(.title2.weight(.semibold))
+                HStack(spacing: 5) { Zustandspunkt(art: WeltenWorte.punkt(ticket: ticket.stand)); Text(ticket.stand) }.font(.callout)
+            }
+            HStack(spacing: 6) {
+                WeltenAbzeichen(text: WeltenWorte.kind(ticket.kind), hilfe: WeltenWorte.kindErklaerung(ticket.kind))
+                WeltenAbzeichen(text: WeltenWorte.prioritaet(ticket.prioritaet), hervorgehoben: WeltenWorte.prioritaetHervor(ticket.prioritaet),
+                                hilfe: ticket.prioritaetText.isEmpty ? WeltenWorte.prioritaetText(ticket.prioritaet) : ticket.prioritaetText)
+                WeltenAmpel(stand: ticket.ampel, frist: ticket.grenzen["frist"] ?? "")
+                if let z = ticket.zyklus { WeltenAbzeichen(text: z, hilfe: "Zyklus, in dem das Ticket geplant ist") }
+                Text(ticket.id).font(.caption).monospaced().foregroundStyle(.tertiary).textSelection(.enabled)
+            }
+            if let zusatz = WeltenTicketWorte.standzeile(ticket, welt: welt) {
+                Text(zusatz).font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private var auftrag: some View {
+        karte("Auftrag") {
+            // Ein Skill-Vorschlag traegt den Diff auch im Ziel; der steht schon in der Karte darueber.
+            feld("Ziel", ticket.skillVorschlag == nil ? ticket.ziel : (ticket.ziel.components(separatedBy: "\n\n").first ?? ticket.ziel))
+            feld("Fertig heißt", ticket.fertig)
+            feld("Adressiert an", (ticket.adressaten.map { welt.anzeigename($0) } + (ticket.team.map { ["Team \(WeltenWorte.team($0))"] } ?? [])).joined(separator: ", "))
+            if let b = ticket.bearbeiter { feld("Bearbeiter", welt.anzeigename(b)) }
+            feld("Absender", welt.anzeigename(ticket.absender))
+            feld("Angelegt", AgentsWorte.uhrzeit(ticket.angelegt))
+            if !ticket.abhaengig.isEmpty {
+                feld("Hängt ab von", ticket.abhaengig.map { id in
+                    let t = welt.ticket(id)
+                    return "„\(t?.titel ?? id)“ (\(t?.stand ?? "unbekannt"))"
+                }.joined(separator: ", "))
+            }
+            if !ticket.grenzen.isEmpty { feld("Grenzen", ticket.grenzen.sorted { $0.key < $1.key }.map { "\($0.key): \($0.value)" }.joined(separator: ", ")) }
+            if let e = ticket.eltern { verweis("Eltern", e) }
+            if let o = ticket.herkunft { verweis("Entdeckt bei", o) }
+            if !kinder.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(alignment: .firstTextBaseline, spacing: 10) {
+                        Text("Kinder").foregroundStyle(.secondary).frame(width: 110, alignment: .leading)
+                        Text("\(ticket.kinderAbgenommen) von \(ticket.kinderGesamt) abgenommen")
+                    }
+                    .font(.callout)
+                    ForEach(kinder) { k in
+                        Button { zustand.ticketAuswahl = k.id } label: {
+                            HStack(spacing: 6) {
+                                Zustandspunkt(art: WeltenWorte.punkt(ticket: k.stand), basis: 7)
+                                Text("„\(k.titel)“ (\(k.stand))").font(.callout)
+                            }
+                        }
+                        .buttonStyle(.link)
+                        .padding(.leading, 120)
+                    }
+                }
+            }
+        }
+    }
+
+    private var kinder: [WeltTicket] {
+        welt.tickets.filter { $0.eltern == ticket.id }.sorted { $0.angelegt != $1.angelegt ? $0.angelegt < $1.angelegt : $0.id < $1.id }
+    }
+
+    private func verweis(_ name: String, _ id: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Text(name).foregroundStyle(.secondary).frame(width: 110, alignment: .leading)
+            Button("„\(welt.ticket(id)?.titel ?? id)“") { zustand.ticketAuswahl = id }
+                .buttonStyle(.link)
+        }
+        .font(.callout)
+    }
+
+    // --- Fertig-Liste, Zwischenstände, Ergebnis, Prüfung, Abnahme ---------------------
+
+    private var fertigListe: some View {
+        let stand = ticket.fertigStand
+        return karte("Fertig-Liste (\(stand.erledigt) von \(stand.gesamt))") {
+            ForEach(ticket.fertigPunkte) { p in
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Image(systemName: p.erledigt ? "checkmark.square" : "square")
+                        .foregroundStyle(p.erledigt ? Color.accentColor : Color.secondary)
+                        .accessibilityHidden(true)
+                    Text(p.text).font(.callout).strikethrough(p.erledigt, color: .secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if let von = p.von, p.erledigt {
+                        Text("· \(welt.anzeigename(von))").font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel("\(p.text), \(p.erledigt ? "abgehakt" : "offen")")
+            }
+            Text("Abgehakt wird vom Bearbeiter; das Ergebnis geht erst, wenn alles steht.")
+                .font(.caption).foregroundStyle(.tertiary)
+        }
+    }
+
+    private var zwischenstaende: [WeltTicketEreignis] { ticket.verlauf.filter { $0.ereignis == "zwischenstand" } }
+
+    private var zwischenstandKarte: some View {
+        karte("Zwischenstände") {
+            ForEach(Array(zwischenstaende.enumerated()), id: \.offset) { _, e in
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("\(welt.anzeigename(e.von)) · \(AgentsWorte.uhrzeit(e.zeit))").font(.caption).foregroundStyle(.secondary)
+                    Text(e.text).font(.callout).fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+    }
+
+    private func ergebnisKarte(_ e: (text: String, commit: String?, von: String, zeit: String)) -> some View {
+        karte("Ergebnis") {
+            Text(e.text).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+            Text("\(welt.anzeigename(e.von)) · \(AgentsWorte.uhrzeit(e.zeit))\(e.commit.map { " · Commit \($0)" } ?? "")").font(.callout).foregroundStyle(.secondary)
+        }
+    }
+
+    private func pruefKarte(_ r: (pruefer: String, revision: Int, angefordertVon: String, notiz: String?, urteil: String?)) -> some View {
+        karte("Prüfung") {
+            feld("Prüfer", welt.anzeigename(r.pruefer))
+            feld("Angefordert von", welt.anzeigename(r.angefordertVon))
+            if let u = r.urteil { feld("Urteil", WeltenWorte.urteil(u)) }
+            if let n = r.notiz {
+                Text(n).font(.callout).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+            } else {
+                Text("Die Prüfnotiz steht noch aus.").font(.callout).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func abnahmeKarte(_ a: (von: String, zeit: String, bemerkung: String?, grund: String?)) -> some View {
+        karte(ticket.stand == "zurückgegeben" ? "Zurückgegeben" : "Abnahme") {
+            Text("\(welt.anzeigename(a.von)) · \(AgentsWorte.uhrzeit(a.zeit))\(a.grund.map { " · \(WeltenWorte.abnahmeGrund($0))" } ?? "")").font(.callout)
+            if let b = a.bemerkung { Text(b).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true) }
+            if ticket.stand == "abgenommen" { rueckgabe }
+        }
+    }
+
+    private func verwurfKarte(_ v: (code: String, bemerkung: String?, duplikatVon: String?)) -> some View {
+        karte("Verworfen") {
+            feld("Grund", WeltenWorte.verwerfGrund(v.code))
+            if let b = v.bemerkung { feld("Bemerkung", b) }
+            if let d = v.duplikatVon { verweis("Duplikat von", d) }
+        }
+    }
+
+    private var messungKarte: some View {
+        karte("Messung") {
+            Text(WeltenTicketWorte.messung(ticket)).font(.callout)
+                .accessibilityIdentifier("welten-ticket-messung")
+            if let z = ticket.zyklus { feld("Zyklus", z) }
+        }
+    }
+
+    private var verlaufKarte: some View {
+        karte("Verlauf") {
+            ForEach(Array(ticket.verlauf.enumerated()), id: \.offset) { _, e in
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text(AgentsWorte.uhrzeit(e.zeit)).font(.callout).monospacedDigit().foregroundStyle(.secondary).frame(width: 90, alignment: .leading)
+                    Text("\(welt.anzeigename(e.von)): \(WeltenWorte.ereignis(e.ereignis))\(e.text.isEmpty ? "" : " -- \(e.text)")").font(.callout)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+    }
+
+    // --- Die Handlungen des Menschen (Auftrag tickets4 B) -----------------------------
+
+    /// Welche Handlungen der Kern dem Menschen an diesem Ticket erlaubt (WeltenZustand).
+    private var moegliche: [WeltenZustand.TicketHandlung] { WeltenZustand.moeglicheHandlungen(ticket) }
+
+    private func handlungstitel(_ h: WeltenZustand.TicketHandlung) -> String {
+        switch h {
+        case .rueckgabe: "Zurückgeben …"
+        case .verwerfen: "Verwerfen …"
+        case .annehmen: "Aus der Triage annehmen …"
+        case .umadressieren: "Umadressieren …"
+        case .grenzen: "Grenzen ändern …"
+        case .pruefer: "Prüfer setzen …"
+        }
+    }
+
+    @ViewBuilder
+    private var handlungen: some View {
+        if let e = zustand.ticketHandlung, e.ticket == ticket.id {
+            karte(handlungstitel(e.handlung).replacingOccurrences(of: " …", with: "")) {
+                handlungsformular(e)
+            }
+        } else if !moegliche.isEmpty {
+            karte("Handlungen") {
+                FlussLayout(abstand: 8) {
+                    ForEach(moegliche, id: \.rawValue) { h in
+                        Button(handlungstitel(h)) { zustand.handlungOeffnen(h, ticket, welt: welt) }
+                            .accessibilityIdentifier("welten-handlung-\(h.rawValue)")
+                    }
+                }
+                Text("Jede Handlung geht als Mensch an den Kern; was der Kern dem Menschen nicht erlaubt, steht hier nicht.")
+                    .font(.caption).foregroundStyle(.tertiary)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func handlungsformular(_ e: WeltenZustand.TicketHandlungEntwurf) -> some View {
+        let bindung = Binding(get: { zustand.ticketHandlung ?? e }, set: { zustand.ticketHandlung = $0 })
+        VStack(alignment: .leading, spacing: 10) {
+            switch e.handlung {
+            case .rueckgabe:
+                EmptyView()
+            case .verwerfen:
+                Picker("Grund", selection: bindung.grund) {
+                    ForEach(WeltenWorte.verwerfGruende, id: \.self) { Text(WeltenWorte.verwerfGrund($0)).tag($0) }
+                }
+                .accessibilityIdentifier("welten-verwerfen-grund")
+                TextField("Bemerkung (freiwillig)", text: bindung.bemerkung, axis: .vertical).lineLimit(1...3)
+                if e.grund == "duplikat" {
+                    Picker("Duplikat von", selection: bindung.duplikat) {
+                        Text("bitte wählen").tag("")
+                        ForEach(welt.tickets.filter { $0.id != ticket.id }) { t in Text(t.titel).tag(t.id) }
+                    }
+                    .accessibilityIdentifier("welten-verwerfen-duplikat")
+                }
+            case .annehmen:
+                adressatWahl(bindung)
+                artUndPrioritaet(bindung)
+                punkteFeld(bindung)
+            case .umadressieren:
+                adressatWahl(bindung)
+                TextField("Grund", text: bindung.grund).accessibilityIdentifier("welten-umadressieren-grund")
+            case .grenzen:
+                TextField("Frist (ISO, etwa 2026-09-25T17:00:00Z)", text: bindung.frist).accessibilityIdentifier("welten-grenzen-frist")
+                TextField("Höchste Rundenzahl", text: bindung.runden).accessibilityIdentifier("welten-grenzen-runden")
+            case .pruefer:
+                Picker("Prüfer", selection: bindung.pruefer) {
+                    Text("bitte wählen").tag("")
+                    ForEach(welt.agenten.filter { $0.id != ticket.bearbeiter && $0.stand == "aktiv" }) { a in Text(a.name).tag(a.id) }
+                }
+                .accessibilityIdentifier("welten-pruefer-wahl")
+                Text("Der Prüfer bekommt einen Zug ohne Schreibwerkzeuge mit dem Diff des genannten Commits.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            HStack(spacing: 8) {
+                Spacer()
+                Button("Abbrechen") { zustand.handlungSchliessen() }
+                Button(knopftitel(e.handlung)) { Task { await ausfuehren(e.handlung) } }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!bereit(e))
+                    .accessibilityIdentifier("welten-handlung-ausfuehren")
+            }
+        }
+        .textFieldStyle(.roundedBorder)
+    }
+
+    private func adressatWahl(_ b: Binding<WeltenZustand.TicketHandlungEntwurf>) -> some View {
+        Picker("Adressat", selection: b.an) {
+            Text("bitte wählen").tag("")
+            ForEach(welt.teams) { t in Text("Team \(WeltenWorte.team(t.name))").tag("team:\(t.name)") }
+            ForEach(welt.liste, id: \.self) { id in Text(welt.anzeigename(id)).tag(id) }
+        }
+        .accessibilityIdentifier("welten-handlung-adressat")
+    }
+
+    private func artUndPrioritaet(_ b: Binding<WeltenZustand.TicketHandlungEntwurf>) -> some View {
+        Group {
+            Picker("Art", selection: b.kind) {
+                ForEach(WeltenWorte.ticketArten, id: \.self) { Text(WeltenWorte.kind($0)).tag($0) }
+            }
+            .accessibilityIdentifier("welten-handlung-art")
+            Picker("Priorität", selection: b.prioritaet) {
+                ForEach(0..<4) { p in Text(WeltenWorte.prioritaet(p)).tag(p) }
+            }
+            .accessibilityIdentifier("welten-handlung-prioritaet")
+        }
+    }
+
+    private func punkteFeld(_ b: Binding<WeltenZustand.TicketHandlungEntwurf>) -> some View {
+        WeltenPunkteFeld(punkte: b.fertigPunkte, kennung: "welten-handlung-punkt")
+    }
+
+    private func knopftitel(_ h: WeltenZustand.TicketHandlung) -> String {
+        switch h {
+        case .rueckgabe: "Zurückgeben"
+        case .verwerfen: "Verwerfen"
+        case .annehmen: "Annehmen"
+        case .umadressieren: "Umadressieren"
+        case .grenzen: "Grenzen setzen"
+        case .pruefer: "Prüfung anfordern"
+        }
+    }
+
+    private func bereit(_ e: WeltenZustand.TicketHandlungEntwurf) -> Bool {
+        switch e.handlung {
+        case .rueckgabe: return !zustand.rueckgabeText.trimmingCharacters(in: .whitespaces).isEmpty
+        case .verwerfen: return e.grund != "duplikat" || !e.duplikat.isEmpty
+        case .annehmen: return !e.an.isEmpty
+        case .umadressieren: return !e.an.isEmpty && !e.grund.trimmingCharacters(in: .whitespaces).isEmpty
+        case .grenzen: return !e.frist.isEmpty || !e.runden.isEmpty
+        case .pruefer: return !e.pruefer.isEmpty
+        }
+    }
+
+    private func ausfuehren(_ h: WeltenZustand.TicketHandlung) async {
+        switch h {
+        case .rueckgabe: await zustand.zurueckgeben(welt, ticket: ticket.id, echt: true)
+        case .verwerfen: await zustand.verwerfen(welt, echt: true)
+        case .annehmen: await zustand.annehmen(welt, echt: true)
+        case .umadressieren: await zustand.umadressieren(welt, echt: true)
+        case .grenzen: await zustand.grenzenSetzen(welt, echt: true)
+        case .pruefer: await zustand.prueferSetzen(welt, echt: true)
+        }
     }
 
     /// Ein abgenommenes Ticket zurueckgeben (Plan Abschnitt 5): Bemerkung, dann an den Bearbeiter.
@@ -1945,11 +2759,53 @@ struct WeltenTicketDetail: View {
     }
 }
 
+/// Eine Liste freier Punkte mit Hinzufügen und Entfernen (Fertig-Punkte, Definition of Done).
+struct WeltenPunkteFeld: View {
+    @Binding var punkte: [String]
+    let kennung: String
+    var titel = "Fertig-Punkte"
+    var platzhalter = "Ein abhakbarer Punkt"
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(titel).font(.callout.weight(.semibold))
+                Spacer()
+                Button {
+                    punkte.append("")
+                } label: {
+                    Label("Punkt hinzufügen", systemImage: "plus")
+                }
+                .controlSize(.small)
+                .accessibilityIdentifier("\(kennung)-plus")
+            }
+            ForEach(Array(punkte.indices), id: \.self) { i in
+                HStack(spacing: 6) {
+                    TextField(platzhalter, text: Binding(get: { punkte.indices.contains(i) ? punkte[i] : "" },
+                                                         set: { if punkte.indices.contains(i) { punkte[i] = $0 } }))
+                        .textFieldStyle(.roundedBorder)
+                        .accessibilityIdentifier("\(kennung)-\(i)")
+                    Button {
+                        if punkte.indices.contains(i) { punkte.remove(at: i) }
+                    } label: {
+                        Image(systemName: "minus.circle")
+                    }
+                    .buttonStyle(.borderless)
+                    .accessibilityLabel("Punkt \(i + 1) entfernen")
+                }
+            }
+            if punkte.isEmpty {
+                Text("Keine Punkte. Story, Task und Subtask werden ohne Fertig-Liste nicht zugestellt.")
+                    .font(.caption).foregroundStyle(.tertiary)
+            }
+        }
+    }
+}
+
 struct WeltenTicketFormular: View {
     let welt: Welt
     @State var entwurf: WeltenZustand.TicketEntwurf
     @Bindable var zustand: WeltenZustand
-    @Environment(\.dismiss) private var schliessen
 
     init(welt: Welt, entwurf: WeltenZustand.TicketEntwurf, zustand: WeltenZustand) {
         self.welt = welt
@@ -1957,31 +2813,120 @@ struct WeltenTicketFormular: View {
         self.zustand = zustand
     }
 
+    /// Der Steuerkanal schreibt in `zustand.neuesTicket`; das Formular folgt ihm.
+    private func nachziehen() {
+        if let e = zustand.neuesTicket, e != entwurf, e.id != entwurf.id || e.titel != entwurf.titel
+            || e.ziel != entwurf.ziel || e.fertig != entwurf.fertig || e.an != entwurf.an || e.kind != entwurf.kind
+            || e.prioritaet != entwurf.prioritaet || e.fertigPunkte != entwurf.fertigPunkte || e.eltern != entwurf.eltern
+            || e.abhaengig != entwurf.abhaengig || e.frist != entwurf.frist || e.runden != entwurf.runden {
+            entwurf = e
+        }
+    }
+
+    /// Die Vorschau der Definition of Ready (Plan Satz 45): sie warnt, sie blockt nicht.
+    private var bereitschaft: String? {
+        WeltenWorte.bereitschaft(kind: entwurf.kind,
+                                 punkte: entwurf.fertigPunkte.filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }.count,
+                                 frist: entwurf.frist, runden: entwurf.runden,
+                                 adressaten: !entwurf.an.isEmpty,
+                                 titel: entwurf.titel, ziel: entwurf.ziel, fertig: entwurf.fertig)
+    }
+
+    /// Die Tickets, die nach den Hierarchieregeln Eltern sein dürfen (Satz 43).
+    private var elternWahl: [WeltTicket] {
+        let erlaubt: String
+        switch entwurf.kind {
+        case "story": erlaubt = "vorhaben"
+        case "task": erlaubt = "story"
+        case "subtask": erlaubt = "task"
+        default: return []
+        }
+        return welt.tickets.filter { $0.kind == erlaubt && !["verworfen", "abgenommen"].contains($0.stand) }
+    }
+
     var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
         Form {
             Section("Neues Ticket in \(welt.name)") {
                 TextField("Titel", text: $entwurf.titel)
                 TextField("Ziel", text: $entwurf.ziel, axis: .vertical).lineLimit(2...4)
                 TextField("Fertig heißt", text: $entwurf.fertig, axis: .vertical).lineLimit(2...4)
+            }
+            Section("Fertig-Punkte") {
+                WeltenPunkteFeld(punkte: $entwurf.fertigPunkte, kennung: "welten-ticket-punkt", titel: "Abhakbare Punkte")
+            }
+            Section("Einordnung") {
+                Picker("Art", selection: $entwurf.kind) {
+                    ForEach(WeltenWorte.ticketArten, id: \.self) { Text(WeltenWorte.kind($0)).tag($0) }
+                }
+                .accessibilityIdentifier("welten-ticket-art")
+                Text(WeltenWorte.kindErklaerung(entwurf.kind)).font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Picker("Priorität", selection: $entwurf.prioritaet) {
+                    ForEach(0..<4) { p in Text(WeltenWorte.prioritaet(p)).tag(p) }
+                }
+                .accessibilityIdentifier("welten-ticket-prioritaet")
+                Text(WeltenWorte.prioritaetText(entwurf.prioritaet)).font(.caption).foregroundStyle(.secondary)
                 Picker("Adressat", selection: $entwurf.an) {
                     Text("Hauptagent entscheidet").tag("")
                     ForEach(welt.teams) { t in Text("Team \(WeltenWorte.team(t.name))").tag("team:\(t.name)") }
                     ForEach(welt.liste, id: \.self) { id in Text(welt.anzeigename(id)).tag(id) }
                 }
+                .accessibilityIdentifier("welten-ticket-adressat")
+                if !elternWahl.isEmpty {
+                    Picker("Eltern", selection: $entwurf.eltern) {
+                        Text("ohne").tag("")
+                        ForEach(elternWahl) { t in Text(t.titel).tag(t.id) }
+                    }
+                    .accessibilityIdentifier("welten-ticket-eltern")
+                }
+            }
+            Section("Abhängigkeiten und Grenzen") {
+                Picker("Hängt ab von", selection: Binding(get: { entwurf.abhaengig.first ?? "" },
+                                                          set: { entwurf.abhaengig = $0.isEmpty ? [] : [$0] })) {
+                    Text("nichts").tag("")
+                    ForEach(welt.tickets.filter { $0.stand != "verworfen" }) { t in Text(t.titel).tag(t.id) }
+                }
+                .accessibilityIdentifier("welten-ticket-abhaengig")
+                TextField("Frist (ISO, etwa 2026-09-25T17:00:00Z)", text: $entwurf.frist)
+                    .accessibilityIdentifier("welten-ticket-frist")
+                TextField("Höchste Rundenzahl", text: $entwurf.runden)
+                    .accessibilityIdentifier("welten-ticket-runden")
+                Text("Ohne Frist und ohne Rundenzahl setzt der Kern sechs Runden.").font(.caption).foregroundStyle(.tertiary)
             }
         }
         .formStyle(.grouped)
-        .frame(width: 480)
-        .toolbar {
-            ToolbarItem(placement: .cancellationAction) { Button("Abbrechen") { schliessen() } }
-            ToolbarItem(placement: .confirmationAction) {
-                Button("Anlegen") {
-                    Task {
-                        if await zustand.ticketAnlegen(welt, entwurf, echt: true) { schliessen() }
-                    }
-                }
-                .disabled([entwurf.titel, entwurf.ziel, entwurf.fertig].contains { $0.trimmingCharacters(in: .whitespaces).isEmpty })
+        .frame(maxHeight: 460)
+        .scrollContentBackground(.hidden)
+        .onChange(of: zustand.neuesTicket) { _, _ in nachziehen() }
+        .onAppear { nachziehen() }
+        .accessibilityIdentifier("welten-ticket-formular")
+        Divider()
+        // Die Vorschau der Definition of Ready steht neben den Knoepfen, damit sie beim
+        // Ausfuellen immer sichtbar bleibt; sie warnt, sie blockt nicht (Plan Satz 45).
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Zustandspunkt(art: bereitschaft == nil ? .laeuft : .will, basis: 7)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(bereitschaft.map { "Wird noch nicht zugestellt: \($0)." } ?? "Wird zugestellt.")
+                    .font(.callout)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text("Die Vorschau hält nichts auf; angelegt wird das Ticket so oder so.")
+                    .font(.caption).foregroundStyle(.tertiary)
             }
+            .accessibilityElement(children: .combine)
+            .accessibilityIdentifier("welten-ticket-bereitschaft")
+            Spacer(minLength: 12)
+            Button("Abbrechen") { zustand.neuesTicket = nil }
+            Button("Anlegen") {
+                Task {
+                    if await zustand.ticketAnlegen(welt, entwurf, echt: true) { zustand.neuesTicket = nil }
+                }
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled([entwurf.titel, entwurf.ziel, entwurf.fertig].contains { $0.trimmingCharacters(in: .whitespaces).isEmpty })
+            .accessibilityIdentifier("welten-ticket-anlegen")
+        }
+        .padding(.top, 8)
         }
     }
 }
@@ -2356,9 +3301,12 @@ struct WeltenInspektor: View {
                 feld("Stand", welt.stand + (welt.standGrund.map { ", \($0)" } ?? ""))
                 feld("Hauptagent", welt.agent(welt.hauptagent)?.name ?? "keiner")
                 feld("Agenten", "\(welt.agenten.count) in \(welt.teams.count) \(welt.teams.count == 1 ? "Team" : "Teams")")
-                feld("Tickets", "\(welt.tickets.count), davon \(welt.ticketsOffen) offen")
+                feld("Tickets", "\(welt.tickets.count), davon \(welt.ticketsOffen) offen, \(welt.triage) in der Triage")
                 feld("Fragen", "\(welt.offeneFragen.count) offen von \(welt.fragen.count)")
             }
+            zyklusGruppe
+            dodGruppe
+            wipGruppe
             if !welt.maschine.isEmpty { maschine }
             if !welt.zugaenge.isEmpty {
                 gruppe("Zugänge") {
@@ -2390,6 +3338,107 @@ struct WeltenInspektor: View {
             }
             if !welt.fehler.isEmpty {
                 gruppe("Beim Lesen") { ForEach(welt.fehler, id: \.self) { Text($0).font(.caption) } }
+            }
+        }
+    }
+
+    // --- Zyklus, Definition of Done und WIP-Grenze der Welt (Auftrag tickets4 D) ---------
+
+    /// Die Felder der Welt in Bearbeitung; sie gehen auf, sobald „Bearbeiten" geklickt ist.
+    private var regeln: Binding<WeltenZustand.WeltRegelEntwurf>? {
+        guard zustand.weltRegeln?.welt == welt.pfad else { return nil }
+        return Binding(get: { self.zustand.weltRegeln ?? WeltenZustand.WeltRegelEntwurf() },
+                       set: { self.zustand.weltRegeln = $0 })
+    }
+
+    @ViewBuilder
+    private var zyklusGruppe: some View {
+        gruppe("Zyklus") {
+            let z = welt.zyklus
+            if let jetzt = z.jetzt, z.an {
+                feld("Läuft", "\(jetzt.id) · \(AgentsWorte.uhrzeit(jetzt.start)) bis \(AgentsWorte.uhrzeit(jetzt.ende))")
+                if !jetzt.ziel.isEmpty { feld("Ziel", jetzt.ziel) }
+            } else if let jetzt = z.jetzt {
+                feld("Aus", "zuletzt \(jetzt.id)")
+            } else {
+                Text("Diese Welt arbeitet ohne Zyklus. Eine Bauwelt bekommt einen, eine Betriebswelt braucht keinen.")
+                    .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+            feld("Länge", "\(z.tage) \(z.tage == 1 ? "Tag" : "Tage")")
+            if let r = regeln {
+                TextField("Länge in Tagen", text: r.zyklusTage).textFieldStyle(.roundedBorder)
+                    .accessibilityIdentifier("welten-zyklus-tage")
+                TextField("Ziel dieses Zyklus", text: r.zyklusZiel).textFieldStyle(.roundedBorder)
+                    .accessibilityIdentifier("welten-zyklus-ziel")
+                HStack(spacing: 8) {
+                    Button(z.an ? "Neu starten" : "Einschalten") { Task { await zustand.zyklusSetzen(welt, an: true, echt: true) } }
+                        .accessibilityIdentifier("welten-zyklus-ein")
+                    if z.an {
+                        Button("Ausschalten") { Task { await zustand.zyklusSetzen(welt, an: false, echt: true) } }
+                            .accessibilityIdentifier("welten-zyklus-aus")
+                    }
+                }
+                .controlSize(.small)
+            } else {
+                Button("Bearbeiten") { zustand.regelnOeffnen(welt) }
+                    .controlSize(.small)
+                    .accessibilityIdentifier("welten-regeln-bearbeiten")
+            }
+            if !z.historie.isEmpty {
+                Text("Abgeschlossen").font(.caption).foregroundStyle(.secondary)
+                ForEach(z.historie.reversed()) { h in
+                    Text("\(h.id): \(h.angelegt) angelegt · \(h.abgenommen) abgenommen · \(h.uebertragen) übertragen")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .accessibilityIdentifier("welten-zyklus-\(h.id)")
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var dodGruppe: some View {
+        gruppe("Definition of Done") {
+            if let r = regeln {
+                WeltenPunkteFeld(punkte: r.dod, kennung: "welten-dod", titel: "Punkte der Welt", platzhalter: "Was für alles gilt, was diese Welt liefert")
+                HStack {
+                    Spacer()
+                    Button("Sichern") { Task { await zustand.dodSichern(welt, echt: true) } }
+                        .controlSize(.small)
+                        .accessibilityIdentifier("welten-dod-sichern")
+                }
+            } else if welt.dod.isEmpty {
+                Text("Noch keine. Ohne Definition of Done nimmt der Abnehmende ohne Bestätigung ab.")
+                    .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            } else {
+                ForEach(Array(welt.dod.enumerated()), id: \.offset) { _, p in
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Image(systemName: "checkmark").font(.caption).foregroundStyle(.secondary).accessibilityHidden(true)
+                        Text(p).font(.callout).fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var wipGruppe: some View {
+        gruppe("WIP-Grenze") {
+            let w = WeltenZustand.wipText(welt)
+            HStack(spacing: 6) {
+                Text(w.text).font(.callout).monospacedDigit().foregroundStyle(w.rot ? Color.orange : Color.primary)
+                Text(w.rot ? "überschritten" : "laufende und geparkte Tickets").font(.caption).foregroundStyle(.secondary)
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityIdentifier("welten-wip")
+            if let r = regeln {
+                TextField("Grenze (leer: aktive Agenten plus ein Viertel)", text: r.wip).textFieldStyle(.roundedBorder)
+                    .accessibilityIdentifier("welten-wip-feld")
+                HStack {
+                    Spacer()
+                    Button("Setzen") { Task { await zustand.wipSetzen(welt, echt: true) } }
+                        .controlSize(.small)
+                        .accessibilityIdentifier("welten-wip-setzen")
+                }
             }
         }
     }
@@ -2427,7 +3476,7 @@ extension WeltenZustand {
         guard let n = kern.welten, let w = welt(n) else { return raus }
         raus["welten"] = n.welten.map { ["name": $0.name, "pfad": $0.pfad, "art": $0.art, "fehler": $0.fehler, "maschine": $0.maschine,
                                          "menuname": WeltenUebersichtWorte.menuname($0)] as [String: Any] }
-        raus["welt"] = ["name": w.name, "pfad": w.pfad, "stand": w.stand, "zaehler": WeltenWorte.zaehler(w), "hauptagent": w.hauptagent ?? "",
+        raus["welt"] = ["name": w.name, "pfad": w.pfad, "stand": w.stand, "zaehler": WeltenWorte.zaehlerGetrennt(w), "hauptagent": w.hauptagent ?? "",
                         "maschine": w.maschine, "fern": w.fern, "ablage": w.ablage, "herkunft": WeltenWorte.herkunft(w),
                         "verbindung": ["ok": w.verbindungOk, "seit": w.verbindungSeit ?? "", "text": w.verbindungText] as [String: Any],
                         "traeger": WeltenWorte.traeger(w), "hinweis": WeltenWorte.maschinenHinweis(w) ?? ""] as [String: Any]
@@ -2486,8 +3535,50 @@ extension WeltenZustand {
             ["id": t.id, "stand": t.stand, "bemerkung": t.abnahme?.bemerkung ?? "", "rueckgabeOffen": rueckgabeOffen == t.id, "rueckgabeText": rueckgabeText,
              "art": t.art, "skillVorschlag": t.skillVorschlag.map { ["skill": $0.skill, "agent": $0.agent, "ziel": $0.ziel, "stand": $0.stand, "pruefer": $0.pruefer,
                                                                     "diffZeilen": $0.diff.split(separator: "\n").count, "entschiedenVon": $0.entschiedenVon ?? ""] as [String: Any] } ?? [:],
-             "skillAblehnenOffen": skillAblehnenOffen == t.id]
+             "skillAblehnenOffen": skillAblehnenOffen == t.id,
+             // tickets4: alles, was die Detailansicht nach Plan Satz 37 und 38 zeigt.
+             "kind": t.kind, "prioritaet": t.prioritaet, "prioritaetText": t.prioritaetText, "ampel": t.ampel,
+             "eltern": t.eltern ?? "", "herkunft": t.herkunft ?? "", "duplikatVon": t.duplikatVon ?? "", "zyklus": t.zyklus ?? "",
+             "kinder": ["gesamt": t.kinderGesamt, "abgenommen": t.kinderAbgenommen] as [String: Any],
+             "fertigPunkte": t.fertigPunkte.map { ["text": $0.text, "erledigt": $0.erledigt] as [String: Any] },
+             "zwischenstaende": t.verlauf.filter { $0.ereignis == "zwischenstand" }.map(\.text),
+             "messung": WeltenTicketWorte.messung(t),
+             "standzeile": WeltenTicketWorte.standzeile(t, welt: w) ?? "",
+             "abnahmeGrund": t.abnahme?.grund ?? "",
+             "pruefung": t.pruefung.map { ["pruefer": $0.pruefer, "urteil": $0.urteil ?? "", "notiz": $0.notiz ?? ""] as [String: Any] } ?? [:],
+             "verworfen": t.verworfen.map { ["code": $0.code, "bemerkung": $0.bemerkung ?? "", "duplikatVon": $0.duplikatVon ?? ""] as [String: Any] } ?? [:],
+             "geparkt": t.geparkt.map { ["grund": $0.grund, "bis": $0.bis ?? "", "auf": $0.auf ?? ""] as [String: Any] } ?? [:],
+             "flagge": t.flagge.map { ["grund": $0.grund, "frage": $0.frage ?? ""] as [String: Any] } ?? [:],
+             "handlungen": Self.moeglicheHandlungen(t).map(\.rawValue)]
         } ?? [:]
+        raus["ticketAnsicht"] = ticketAnsicht.rawValue
+        raus["ticketHandlung"] = ticketHandlung.map {
+            ["ticket": $0.ticket, "handlung": $0.handlung.rawValue, "grund": $0.grund, "bemerkung": $0.bemerkung,
+             "duplikat": $0.duplikat, "an": $0.an, "pruefer": $0.pruefer, "art": $0.kind, "prioritaet": $0.prioritaet,
+             "punkte": $0.fertigPunkte, "frist": $0.frist, "runden": $0.runden] as [String: Any]
+        } ?? [:]
+        raus["ticketFormular"] = neuesTicket.map { e -> [String: Any] in
+            let punkte = e.fertigPunkte.filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+            return ["titel": e.titel, "ziel": e.ziel, "fertig": e.fertig, "an": e.an, "art": e.kind,
+                    "prioritaet": e.prioritaet, "punkte": punkte, "eltern": e.eltern, "abhaengig": e.abhaengig,
+                    "frist": e.frist, "runden": e.runden,
+                    "bereitschaft": WeltenWorte.bereitschaft(kind: e.kind, punkte: punkte.count, frist: e.frist, runden: e.runden,
+                                                             adressaten: !e.an.isEmpty, titel: e.titel, ziel: e.ziel, fertig: e.fertig) ?? ""]
+        } ?? [:]
+        raus["weltRegeln"] = weltRegeln.map { ["welt": $0.welt, "zyklusTage": $0.zyklusTage, "zyklusZiel": $0.zyklusZiel,
+                                               "dod": $0.dod, "wip": $0.wip] as [String: Any] } ?? [:]
+        raus["weltZyklus"] = ["an": w.zyklus.an, "tage": w.zyklus.tage, "jetzt": w.zyklus.jetzt?.id ?? "",
+                              "ziel": w.zyklus.jetzt?.ziel ?? "",
+                              "historie": w.zyklus.historie.map { ["id": $0.id, "angelegt": $0.angelegt, "abgenommen": $0.abgenommen, "uebertragen": $0.uebertragen] as [String: Any] }] as [String: Any]
+        raus["weltDod"] = w.dod
+        raus["weltWip"] = ["laufend": w.wip.laufend, "grenze": w.wip.grenze, "text": Self.wipText(w).text, "rot": Self.wipText(w).rot] as [String: Any]
+        raus["backlog"] = Self.backlog(w).map(\.id)
+        raus["board"] = Self.board(w, tickets: tickets(w)).map { spur -> [String: Any] in
+            ["id": spur.id, "titel": spur.titel,
+             "spalten": zip(WeltenWorte.boardSpalten, spur.spalten).map { name, inhalt in
+                 ["name": name, "tickets": inhalt.map(\.id)] as [String: Any]
+             }]
+        }
         raus["profilEntwurf"] = profilEntwurf.map { ["agent": $0.agent, "modell": $0.modell, "denkstufe": $0.denkstufe, "fallback": $0.fallback, "fallbackDenkstufe": $0.fallbackDenkstufe, "maschine": $0.maschine, "spezialgebiet": $0.spezialgebiet] } ?? [:]
         raus["antraege"] = w.antraege.map { ["id": $0.id, "von": $0.von, "agent": $0.agent, "stand": $0.stand] }
         raus["vorlagen"] = n.vorlagen.map(\.name)
@@ -2499,7 +3590,12 @@ extension WeltenZustand {
                               "maschineVorgabe": w.maschineVorgabe, "webZugang": w.webZugang, "rechteAenderbar": w.rechteAenderbar,
                               "skillKatalog": w.skillKatalog.map { "\($0.name) (\($0.ebene))" }] as [String: Any]
         raus["gedaechtnisEntwurf"] = gedaechtnisEntwurf.map { ["agent": $0.agent, "zeichen": $0.text.count, "sha": $0.sha] as [String: Any] } ?? [:]
-        raus["tickets"] = tickets(w).map { ["id": $0.id, "titel": $0.titel, "stand": $0.stand, "adressaten": $0.adressaten] as [String: Any] }
+        raus["tickets"] = tickets(w).map { ["id": $0.id, "titel": $0.titel, "stand": $0.stand, "adressaten": $0.adressaten,
+                                            "kind": $0.kind, "prioritaet": $0.prioritaet, "ampel": $0.ampel,
+                                            "zeile": WeltenTicketWorte.zeile($0, welt: w),
+                                            "standzeile": WeltenTicketWorte.standzeile($0, welt: w) ?? "",
+                                            "ordnung": $0.ordnung ?? -1,
+                                            "kinder": "\($0.kinderAbgenommen) von \($0.kinderGesamt)"] as [String: Any] }
         raus["inspektorInhalt"] = a.map { agent -> [String: Any] in
             switch blatt {
             case .profil:
