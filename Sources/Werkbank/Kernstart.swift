@@ -79,6 +79,15 @@ final class Kernstart {
         return f.fileExists(atPath: p + "/package.json") && f.fileExists(atPath: p + "/dist/main/main.js")
     }
 
+    /// Die eigentliche Electron-Binaerdatei, nicht `node_modules/.bin/electron`.
+    /// Der .bin-Eintrag ist ein Skript mit `#!/usr/bin/env node`; ein Finder-Start
+    /// wuerde damit einen beliebigen `node` aus PATH als Zwischenprozess starten.
+    /// Die Electron-Binaerdatei ist Teil des zum Kern gehoerenden Pakets und wird
+    /// auf Apple Silicon unmittelbar nativ ausgefuehrt.
+    static func electronPfad(kernPfad: String) -> String {
+        "\(kernPfad)/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron"
+    }
+
     /// Ein einzelner Wert aus der Einstellungsdatei, ohne Schema und ohne
     /// Schreibweg: gelesen wird hier nur (geschrieben wird ausschliesslich
     /// ueber `wb-state settings set`, siehe app/src/main/einstellungen.ts).
@@ -130,9 +139,9 @@ final class Kernstart {
             return nil
         }
 
-        let elektron = "\(kernPfad)/node_modules/.bin/electron"
+        let elektron = Self.electronPfad(kernPfad: kernPfad)
         guard FileManager.default.isExecutableFile(atPath: elektron) else {
-            fehler = "\(elektron) fehlt -- 'npm install' in \(kernPfad)"
+            fehler = "\(elektron) fehlt oder ist nicht ausfuehrbar -- 'npm install' in \(kernPfad)"
             return nil
         }
 

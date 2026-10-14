@@ -7,7 +7,8 @@
 # SwiftPM reicht (kein xcodebuild): `swift build` liefert die ausfuehrbaren
 # Dateien, das Buendel entsteht hier von Hand. SwiftTerm bringt ein
 # Ressourcenbuendel mit (Metal-Shader); es wandert nach Contents/Resources,
-# wo `Bundle.module` es findet. Ad-hoc-Signatur, damit macOS 26 die App startet.
+# wo `Bundle.module` es findet. Signiert wird ueber mac/bin/signieren (stabile
+# Identitaet, Rueckfall ad hoc), damit macOS 26 die App startet und Freigaben behaelt.
 set -euo pipefail
 MAC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 KONF=release
@@ -77,11 +78,13 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>LSMinimumSystemVersion</key><string>26.0</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSSupportsAutomaticGraphicsSwitching</key><true/>
-  <key>NSHumanReadableCopyright</key><string>der Nutzer the user</string>
+  <key>NSHumanReadableCopyright</key><string>Copyright Skryx-L-A. PolyForm-Noncommercial-1.0.0</string>
   <key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
 </dict>
 </plist>
 PLIST
 printf 'APPL????' > "$APP/Contents/PkgInfo"
-codesign --force --sign - "$APP" >/dev/null 2>&1 || echo "bauen: Ad-hoc-Signatur fehlgeschlagen (App startet meist trotzdem)" >&2
+# Stabile Signatur statt ad hoc, damit macOS die Freigaben ueber Neubauten
+# behaelt (mac/bin/signieren, docs/MAC-SIGNATUR.md).
+bash "$MAC/bin/signieren" "$APP" >/dev/null || echo "bauen: Signatur fehlgeschlagen (App startet meist trotzdem)" >&2
 echo "gebaut: $APP ($KONF)"

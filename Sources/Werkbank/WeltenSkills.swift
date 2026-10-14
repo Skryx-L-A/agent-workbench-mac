@@ -194,7 +194,7 @@ struct WeltenSkillVorschlagKarte: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Skill-Vorschlag").font(.headline)
-            Text("„\(vorschlag.skill)“ von \(welt.anzeigename(vorschlag.agent)) für \(WeltenSkillWorte.ebene(vorschlag.ziel)) · prüft \(welt.anzeigename(vorschlag.pruefer)) · \(vorschlag.stand)")
+            Text("„\(vorschlag.skill)“ von \(welt.anzeigename(vorschlag.agent)) für \(vorschlag.ziel == "agent" ? "den Agentenordner" : WeltenSkillWorte.ebene(vorschlag.ziel)) · prüft \(welt.anzeigename(vorschlag.pruefer)) · \(vorschlag.stand)")
                 .font(.callout)
             if !vorschlag.beschreibung.isEmpty { Text(vorschlag.beschreibung).font(.callout).foregroundStyle(.secondary) }
             if !vorschlag.begruendung.isEmpty { Text("Begründung: \(vorschlag.begruendung)").font(.callout).foregroundStyle(.secondary) }

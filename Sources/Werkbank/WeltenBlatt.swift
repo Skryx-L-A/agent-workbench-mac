@@ -70,7 +70,7 @@ final class WeltenZustand {
     }
     /// Die Handlung, die im Ticketdetail gerade offen steht; nur eine zur Zeit.
     enum TicketHandlung: String, CaseIterable, Equatable, Sendable {
-        case rueckgabe, verwerfen, annehmen, umadressieren, grenzen, pruefer
+        case rueckgabe, verwerfen, annehmen, umadressieren, grenzen, pruefer, abnehmen
     }
     /// Die Felder aller Detail-Handlungen an einem Ticket; sie leeren sich mit dem Schliessen.
     struct TicketHandlungEntwurf: Equatable {
@@ -82,6 +82,8 @@ final class WeltenZustand {
         var prioritaet = 2
         var fertigPunkte: [String] = []
         var frist = "", runden = ""
+        /// Abnehmen: die Definition of Done der Welt ist bestätigt (`dod_geprueft`).
+        var dodGeprueft = false
     }
     /// Zyklus, Definition of Done und WIP-Grenze der Welt im Inspektor (Auftrag tickets4 D).
     struct WeltRegelEntwurf: Equatable {
@@ -127,6 +129,12 @@ final class WeltenZustand {
         var titel: String { self == .liste ? "Liste" : "Board" }
     }
     var ticketAnsicht: TicketAnsicht = .liste
+    /// Auftrag ticketboard: die zuletzt gemessene Breite des Boards (0 = noch nicht gemessen),
+    /// der Stand, der in der gestapelten Ansicht offen liegt, und die leeren Spalten, die der
+    /// Mensch von Hand aufgeklappt hat.
+    var boardBreite: CGFloat = 0
+    var boardSpalte: String = ""
+    var boardOffen: Set<String> = []
     /// Die offene Handlung im Ticketdetail (Verwerfen, Annehmen, Umadressieren, Grenzen, Prüfer, Abnehmen).
     var ticketHandlung: TicketHandlungEntwurf?
     /// Die Regeln der Welt in Bearbeitung (Zyklus, Definition of Done, WIP-Grenze).
@@ -137,7 +145,10 @@ final class WeltenZustand {
     var adressfeld = ""
     var antwortEntwuerfe: [String: String] = [:]
     var meldung: Meldung?
-    var rueckfrage: Rueckfrage?
+    var rueckfrage: Rueckfrage? {
+        guard case .handlung(let f) = rueckfragen.first?.inhalt else { return nil }
+        return f
+    }
     var neuesTicket: TicketEntwurf?
     var inspektorOffen = true
     var gelesen = WeltenGelesen()
@@ -151,7 +162,10 @@ final class WeltenZustand {
     /// Das offene Anlege-Menue (WeltenAnlegen.swift); solange es steht, zeigt die Mitte das Formular.
     var anlegen: AnlegenEntwurf?
     /// Auftrag fernwelten: die Frage, auf welcher Maschine die globale Welt entsteht; nil = keine offen.
-    var weltNeuFrage: WeltNeuFrage?
+    var weltNeuFrage: WeltNeuFrage? {
+        guard case .weltNeu(let f) = rueckfragen.first?.inhalt else { return nil }
+        return f
+    }
     struct WeltNeuFrage: Equatable, Identifiable {
         let name: String
         /// (Maschine, Knopftitel), die Vorgabe zuerst.
@@ -166,11 +180,137 @@ final class WeltenZustand {
     var skillGrund = ""
     /// WER DIE RUECKFRAGE ZEIGT (Auftrag agentsui Nr. 6). Tab und Fenster teilen den Zustand;
     /// ohne diese Wahl stuende dieselbe Rueckfrage als zwei Hinweise in zwei Fenstern, auch in
-    /// einem, das gerade verborgen ist. Der Tab zeigt sie, solange er steht und das Fenster
-    /// „Agents-Welten …" nicht vorn ist; sonst zeigt sie das Fenster.
+    /// einem, das gerade verborgen ist. Der Tab bekommt sie, wenn er beim Stellen steht und das Fenster
+    /// „Agents-Welten …" nicht vorn ist; sonst bekommt sie das Fenster (fest bis zur Antwort, `rueckfrageOrt`).
     var tabSichtbar = false
     var fensterVorn = false
     var rueckfrageImTab: Bool { tabSichtbar && !fensterVorn }
+    /// WO EINE OFFENE RUECKFRAGE STEHT, FEST AB DEM STELLEN (Auftrag rueckfrage-besitzer, 10.10.2026).
+    /// Beim Stellen entscheidet `rueckfrageImTab` wie bisher; danach bleibt das Sheet an dieser Seite,
+    /// bis sein Knopf es beantwortet oder abbricht. Folgte es `rueckfrageImTab`, naehme ein Fensterwechsel
+    /// (Fenster „Agents-Welten …" nach vorn oder weg, Tab gewechselt) das Sheet an der bisherigen Seite
+    /// ueber den Zustand weg -- derselbe Weg, der in mac-alert-absturz abstuerzte (SwiftUI schliesst das
+    /// NSAlert-Sheet aus dem Layout-Durchlauf, SIGSEGV in `UC::DriverCore`).
+    enum RueckfrageOrt: String { case tab, fenster }
+    var rueckfrageOrt: RueckfrageOrt? { rueckfragen.first?.ort }
+    enum RueckfrageInhalt {
+        case handlung(Rueckfrage), weltNeu(WeltNeuFrage)
+
+        func gleichesZiel(wie andere: Self) -> Bool {
+            switch (self, andere) {
+            case (.handlung(let a), .handlung(let b)):
+                // Gleiche Handlung am gleichen Ziel nur einmal, auch wenn etwa der
+                // Warntext inzwischen anders lautet. Welt-Stopp und Agent-Stopp sind getrennt.
+                let zielFelder: Set<String> = ["welt", "agent", "frage", "ticket", "ordner", "maschine"]
+                let aZiel = a.daten.filter { zielFelder.contains($0.key) }
+                let bZiel = b.daten.filter { zielFelder.contains($0.key) }
+                return a.handlung == b.handlung && (aZiel.isEmpty && bZiel.isEmpty ? a.daten == b.daten : aZiel == bZiel)
+            case (.weltNeu(let a), .weltNeu(let b)): return a.name == b.name
+            default: return false
+            }
+        }
+    }
+    struct OffeneRueckfrage {
+        let id = UUID()
+        let inhalt: RueckfrageInhalt
+        let ort: RueckfrageOrt
+    }
+    /// Eine gemeinsame FIFO fuer Handlungen und Maschinenwahl. Der Kopf bleibt
+    /// unveraendert, solange sein Sheet offen ist; jeder Eintrag behaelt seinen eigenen Ort.
+    private(set) var rueckfragen: [OffeneRueckfrage] = []
+    var rueckfrageId: UUID? { rueckfragen.first?.id }
+    @ObservationIgnored private weak var rueckfrageTabFenster: NSWindow?
+    @ObservationIgnored private weak var rueckfrageWeltenFenster: NSWindow?
+    @ObservationIgnored private(set) var rueckfrageSheetId: UUID?
+    @ObservationIgnored private(set) var rueckfrageSheet: NSAlert?
+
+    func rueckfrageEinreihen(_ inhalt: RueckfrageInhalt) {
+        guard !rueckfragen.contains(where: { $0.inhalt.gleichesZiel(wie: inhalt) }) else { return }
+        rueckfragen.append(OffeneRueckfrage(inhalt: inhalt, ort: rueckfrageImTab ? .tab : .fenster))
+        rueckfrageZeigen()
+    }
+
+    func rueckfrageFensterRegistrieren(_ fenster: NSWindow, ort: RueckfrageOrt) {
+        if ort == .tab { rueckfrageTabFenster = fenster } else { rueckfrageWeltenFenster = fenster }
+        rueckfrageZeigen()
+    }
+
+    func rueckfrageFenster() -> NSWindow? {
+        rueckfrageOrt == .tab ? rueckfrageTabFenster : rueckfrageWeltenFenster
+    }
+
+    /// Kopflose Steuerung schliesst den Kopf direkt; sichtbar schliesst nur der
+    /// Sheet-Knopf. Die UUID schuetzt den Nachfolger vor einer spaeten alten Antwort.
+    func rueckfrageAbbrechen() {
+        guard kopflos, let id = rueckfrageId else { return }
+        rueckfrageEntnehmen(id)
+    }
+
+    private func rueckfrageEntnehmen(_ id: UUID) {
+        guard rueckfrageId == id else { return }
+        rueckfragen.removeFirst()
+        // Nicht aus einem SwiftUI-Layout-Durchlauf und erst nach dem Ende des alten
+        // AppKit-Sheets beginnen. Kein updateExistingAlert, auch bei gleicher Handlung.
+        DispatchQueue.main.async { [weak self] in self?.rueckfrageZeigen() }
+    }
+
+    private func rueckfrageZeigen() {
+        guard !kopflos, rueckfrageSheetId == nil, let offen = rueckfragen.first,
+              let fenster = rueckfrageFenster(), fenster.isVisible else { return }
+        rueckfrageSheetId = offen.id
+        // Native Sheets bleiben auch beim Abbau des Tabs an ihrem Fenster. Ein
+        // SwiftUI-Alert wuerde dabei oder beim Wechsel des Kopfes ueber Zustand schliessen.
+        Task { @MainActor in
+            let alert = NSAlert()
+            alert.alertStyle = .informational
+            switch offen.inhalt {
+            case .handlung(let rf):
+                alert.messageText = rf.text
+                alert.informativeText = rf.warnungen.isEmpty
+                    ? "Das geschieht über die Datenbibliothek der Welt und steht danach in ihren Dateien."
+                    : rf.warnungen.joined(separator: "\n")
+                if rf.handlung == "umziehen" || rf.handlung == "vergessen" {
+                    alert.addButton(withTitle: rf.handlung == "umziehen" ? "Umziehen" : "Entfernen")
+                    alert.addButton(withTitle: "Abbrechen").keyEquivalent = "\u{1b}"
+                } else {
+                    alert.alertStyle = .warning
+                    alert.addButton(withTitle: "Abbrechen").keyEquivalent = "\r"
+                    let tun = alert.addButton(withTitle: rf.handlung == "stoppen" ? "Stoppen" : "Zurücknehmen")
+                    tun.hasDestructiveAction = true
+                    tun.keyEquivalent = ""
+                }
+            case .weltNeu(let f):
+                alert.messageText = "Wo soll die globale Welt liegen?"
+                alert.informativeText = f.text
+                for m in f.wege {
+                    let knopf = alert.addButton(withTitle: "\(WeltenWorte.aufMaschine(m, satzanfang: true)) anlegen")
+                    knopf.keyEquivalent = m == f.vorgabe ? "\r" : ""
+                }
+                alert.addButton(withTitle: "Abbrechen").keyEquivalent = "\u{1b}"
+            }
+            rueckfrageSheet = alert
+            let antwort = await alert.beginSheetModal(for: fenster)
+            let index = antwort.rawValue - NSApplication.ModalResponse.alertFirstButtonReturn.rawValue
+            let abgebrochen = !alert.buttons.indices.contains(index) || alert.buttons[index].title == "Abbrechen"
+            rueckfrageSheetId = nil
+            rueckfrageSheet = nil
+            guard rueckfrageId == offen.id else { return }
+            rueckfrageEntnehmen(offen.id)
+            guard !abgebrochen else { return }
+            switch offen.inhalt {
+            case .handlung(let rf): await rueckfrageAusfuehren(rf)
+            case .weltNeu(let f):
+                if f.wege.indices.contains(index) {
+                    await weltAnlegen(art: "global", maschine: f.wege[index], echt: true)
+                }
+            }
+        }
+    }
+    /// Kopflos bleibt die Rueckfrage Zustand (wie `Fenster.rueckfrage`, `umbenennenFragen`, die
+    /// Einstellungen): ein SwiftUI-Alert an einem nie gezeigten Fenster stuerzte ab, wenn der
+    /// Steuerkanal ihn wegnahm, waehrend AppKit das Sheet noch bewegte (SIGSEGV in
+    /// `NSSheetMoveHelper closeSheet`, Auftrag mac-alert-absturz, 09.10.2026).
+    var kopflos = false
     private(set) var laufend: Set<String> = []
 
     func laufendSetzen(_ handlung: String, _ an: Bool) {
@@ -437,6 +577,61 @@ final class WeltenZustand {
         }
     }
 
+    // --- Wie das Board in die Mitte passt (Auftrag ticketboard) ----------------------
+
+    /// Die Breiten einer vollen und einer zusammengeklappten Spalte und der Abstand dazwischen.
+    enum BoardMass {
+        static let mindest: CGFloat = 140
+        static let hoechst: CGFloat = 300
+        static let streifen: CGFloat = 34
+        static let abstand: CGFloat = 12
+    }
+
+    /// Wie das Board steht: als Spalten (mit ihrer Breite und den zusammengeklappten) oder gestapelt.
+    struct BoardLage: Equatable {
+        let gestapelt: Bool
+        let breite: CGFloat
+        let schmal: [String]
+    }
+
+    /**
+     WIE DAS BOARD IN DIE MITTE PASST (Auftrag ticketboard; Befund tickets4: acht Spalten à 220
+     Punkte rollten waagerecht aus dem Bild). Leere Spalten klappen zu einem schmalen Streifen mit
+     Titel und Zähler zusammen, die übrigen teilen sich den Platz zwischen Mindest- und
+     Höchstbreite. Reicht er auch dann nicht, wechselt das Board in die gestapelte Ansicht: die
+     Stände als Reiter mit Zähler, darunter ein Stand über die ganze Breite. Waagerecht gerollt
+     wird nie.
+
+     `läuft` klappt nie zu, auch leer nicht: an ihrem Kopf hängt die WIP-Anzeige der Welt (Satz 48).
+     */
+    nonisolated static func boardLage(breite verfuegbar: CGFloat, zahlen: [String: Int], offen: Set<String>) -> BoardLage {
+        let spalten = WeltenWorte.boardSpalten
+        let zu = spalten.filter { (zahlen[$0] ?? 0) == 0 && !offen.contains($0) && $0 != "läuft" }
+        // Ein Board ganz ohne Tickets klappt nicht alles weg: dann stehen alle Spalten offen.
+        let schmal = spalten.allSatisfy { (zahlen[$0] ?? 0) == 0 } ? [] : zu
+        let voll = spalten.count - schmal.count
+        guard verfuegbar > 0, voll > 0 else { return BoardLage(gestapelt: false, breite: BoardMass.mindest, schmal: schmal) }
+        let rest = verfuegbar - CGFloat(spalten.count - 1) * BoardMass.abstand - CGFloat(schmal.count) * BoardMass.streifen
+        if rest < CGFloat(voll) * BoardMass.mindest { return BoardLage(gestapelt: true, breite: 0, schmal: []) }
+        return BoardLage(gestapelt: false, breite: min(BoardMass.hoechst, (rest / CGFloat(voll)).rounded(.down)), schmal: schmal)
+    }
+
+    /// Welcher Stand in der gestapelten Ansicht offen liegt: die Wahl, sonst der erste mit Tickets.
+    nonisolated static func boardStand(gewaehlt: String, zahlen: [String: Int]) -> String {
+        if WeltenWorte.boardSpalten.contains(gewaehlt) { return gewaehlt }
+        return WeltenWorte.boardSpalten.first { (zahlen[$0] ?? 0) > 0 } ?? WeltenWorte.boardSpalten[0]
+    }
+
+    /// Wie viele Tickets je Board-Spalte in dieser Auswahl stehen.
+    nonisolated static func boardZahlen(_ tickets: [WeltTicket]) -> [String: Int] {
+        var raus: [String: Int] = [:]
+        for spalte in WeltenWorte.boardSpalten {
+            let staende = WeltenWorte.boardStaende(spalte)
+            raus[spalte] = tickets.filter { staende.contains($0.stand) }.count
+        }
+        return raus
+    }
+
     /// Was am Kopf der Spalte „läuft" steht (Satz 48): „3 von 4", rot bei Überschreitung.
     nonisolated static func wipText(_ w: Welt) -> (text: String, rot: Bool) {
         ("\(w.wip.laufend) von \(w.wip.grenze)", w.wip.grenze > 0 && w.wip.laufend > w.wip.grenze)
@@ -452,10 +647,11 @@ final class WeltenZustand {
         if t.stand != "abgenommen" { raus.append(.verwerfen) }
         raus.append(.umadressieren)
         if !["abgenommen", "verworfen"].contains(t.stand) { raus.append(.grenzen) }
-        // Abnehmen steht dem Menschen NICHT offen (Hausregel vom 11.09.2026, Plan Satz 27:
-        // „der Nutzer nimmt nicht ab“). Abgenommen wird vom Hauptagenten oder vom Teamleiter des
-        // Teams; der Mensch kann ein abgenommenes Ticket zurueckgeben.
         if t.stand == "zur Abnahme" { raus.append(.pruefer) }
+        // Abnehmen darf der Mensch seit Entscheidung des Nutzers vom 18.09.2026 (bestätigt 29.09.:
+        // für ihn freiwillig) aus denselben zwei Ständen wie der Kern (`approve_ticket`). Der Kern
+        // nimmt nur einen echten Klick als belegten Menschen an; der Steuerkanal bleibt abgelehnt.
+        if ["zur Abnahme", "zurückgegeben"].contains(t.stand) { raus.append(.abnehmen) }
         return raus
     }
 
@@ -483,7 +679,7 @@ final class WeltenZustand {
         let r = HandlungsAntwort(await kern.invoke("awb:aufgabe", [befehl, ["echt": echt, "bestaetigt": bestaetigt]]))
         if let f = r.rueckfrage, !bestaetigt {
             let texte = daten.reduce(into: [String: String]()) { $0[$1.key] = "\($1.value)" }
-            rueckfrage = Rueckfrage(handlung: handlung, daten: texte, text: f, warnungen: r.warnungen, echt: echt)
+            rueckfrageEinreihen(.handlung(Rueckfrage(handlung: handlung, daten: texte, text: f, warnungen: r.warnungen, echt: echt)))
             return HandlungsAntwort(ok: false, meldung: r.meldung)
         }
         if !(still && r.ok) { meldung = Meldung(text: r.meldung, ok: r.ok) }
@@ -568,8 +764,18 @@ final class WeltenZustand {
     }
 
     func bestaetigen() async {
-        guard let rf = rueckfrage else { return }
-        rueckfrage = nil
+        guard kopflos, let offen = rueckfragen.first else { return }
+        rueckfrageEntnehmen(offen.id)
+        switch offen.inhalt {
+        case .handlung(let rf): await rueckfrageAusfuehren(rf)
+        case .weltNeu(let f):
+            if f.wege.contains(f.vorgabe) {
+                await weltAnlegen(art: "global", maschine: f.vorgabe, echt: false)
+            }
+        }
+    }
+
+    private func rueckfrageAusfuehren(_ rf: Rueckfrage) async {
         let r = await handlungAntwort(rf.handlung, rf.daten, echt: rf.echt, bestaetigt: true)
         // Eine bestaetigte Ticket-Handlung schliesst ihr Formular im Detail.
         if r.ok, rf.handlung.hasPrefix("ticket_") { handlungSchliessen() }
@@ -716,6 +922,7 @@ final class WeltenZustand {
             e.frist = t.grenzen["frist"] ?? ""
             e.runden = t.grenzen["runden"] ?? ""
         case .pruefer: e.pruefer = w.agenten.first { $0.id != t.bearbeiter && $0.stand == "aktiv" }?.id ?? ""
+        case .abnehmen: e.grund = "erledigt"
         }
         rueckgabeOffen = nil
         ticketHandlung = e
@@ -775,6 +982,34 @@ final class WeltenZustand {
         if await ausfuehren("ticket_pruefen", ["welt": w.pfad, "ticket": e.ticket, "pruefer": e.pruefer], echt: echt) {
             handlungSchliessen()
         }
+    }
+
+    /// Die Gründe, die der Kern bei der Abnahme annimmt (`ABNAHME_GRUENDE` in welten.ts).
+    nonisolated static let abnahmeGruende = ["erledigt", "teilweise"]
+
+    /// Was der Abnahme noch fehlt, in Worten; nil = bereit. Dieselben Regeln wie im Kern, dazu
+    /// kein `|` in der Bemerkung (Trennzeichen des Mobilbelegs) und die bestätigte Definition of Done.
+    nonisolated static func abnahmeFehlt(_ e: TicketHandlungEntwurf, dod: [String]) -> String? {
+        let bemerkung = e.bemerkung.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !abnahmeGruende.contains(e.grund) { return "Bitte einen Grund wählen." }
+        if e.grund == "teilweise" && bemerkung.isEmpty { return "Bei „teilweise“ hält die Bemerkung fest, was offen bleibt." }
+        if bemerkung.contains("|") { return "Die Bemerkung darf kein Zeichen | enthalten." }
+        if !dod.isEmpty && !e.dodGeprueft { return "Bitte die Definition of Done bestätigen." }
+        return nil
+    }
+
+    /// Ein Ticket abnehmen (Satz 27, Entscheidung des Nutzers vom 18.09.2026): aus „zur Abnahme“
+    /// oder „zurückgegeben“, Grund, Bemerkung und die bestätigte Definition of Done.
+    func abnehmen(_ w: Welt, echt: Bool) async {
+        guard let e = ticketHandlung, e.handlung == .abnehmen else { return }
+        if let fehlt = Self.abnahmeFehlt(e, dod: w.dod) {
+            meldung = Meldung(text: fehlt, ok: false)
+            return
+        }
+        let d: [String: Any] = ["welt": w.pfad, "ticket": e.ticket, "grund": e.grund,
+                                "bemerkung": e.bemerkung.trimmingCharacters(in: .whitespacesAndNewlines),
+                                "dod_geprueft": e.dodGeprueft]
+        if await ausfuehren("ticket_abnehmen", d, echt: echt) { handlungSchliessen() }
     }
 
     /// Die Backlog-Reihenfolge der Triage setzen (Satz 44); `reihe` ist die ganze Liste, oben zuerst.
@@ -869,8 +1104,8 @@ final class WeltenZustand {
             let ms = stand.isEmpty ? n.maschinen : stand
             let vorgabe = Self.maschineVorgabe(ms, vorgabe: n.maschineVorgabe)
             let wege = [vorgabe] + ms.filter { $0.name != vorgabe && ($0.eigene || $0.traeger) }.map(\.name)
-            weltNeuFrage = WeltNeuFrage(name: "Global", wege: wege, vorgabe: vorgabe,
-                                        text: wege.map { Self.maschinenWahlText(ms, auswahl: $0) }.joined(separator: "\n"))
+            rueckfrageEinreihen(.weltNeu(WeltNeuFrage(name: "Global", wege: wege, vorgabe: vorgabe,
+                                        text: wege.map { Self.maschinenWahlText(ms, auswahl: $0) }.joined(separator: "\n"))))
             return false
         }
         var daten: [String: Any] = ["art": art == "global" ? "global" : "projekt"]
@@ -976,7 +1211,7 @@ struct WeltenBlatt: View {
             AgentsFusszeile(nutzlast: kern.aufgaben)
         }
         .background(Color(nsColor: .windowBackgroundColor))
-        .weltenRueckfrage(zustand, aktiv: !zustand.rueckfrageImTab)
+        .weltenRueckfrage(zustand, ort: .fenster)
     }
 
     private func inhalt(_ n: WeltenNutzlast, _ w: Welt) -> some View {
@@ -1011,35 +1246,39 @@ struct WeltenBlatt: View {
     }
 }
 
-/// Die Rueckfrage vor Stoppen und Zuruecknehmen -- am Fenster wie am Tab dieselbe.
+/// Tab und Fenster registrieren nur ihren Ort. Die Warteschlange praesentiert
+/// das native Sheet; SwiftUI aktualisiert oder beendet kein stehendes NSAlert.
 extension View {
-    func weltenRueckfrage(_ zustand: WeltenZustand, aktiv: Bool) -> some View {
-        alert(zustand.rueckfrage?.text ?? "", isPresented: Binding(get: { aktiv && zustand.rueckfrage != nil }, set: { if !$0, aktiv { zustand.rueckfrage = nil } }), presenting: zustand.rueckfrage) { rf in
-            // Ein Umzug loescht nichts (die alte Ablage bleibt umbenannt liegen): kein destruktiver Knopf.
-            if rf.handlung == "umziehen" {
-                Button("Umziehen") { Task { await zustand.bestaetigen() } }.keyboardShortcut(.defaultAction)
-            } else if rf.handlung == "vergessen" {
-                // Auftrag agentsform: nur der Eintrag der Liste geht; Ordner und Welt bleiben.
-                Button("Entfernen") { Task { await zustand.bestaetigen() } }.keyboardShortcut(.defaultAction)
-            } else {
-                Button(rf.handlung == "stoppen" ? "Stoppen" : "Zurücknehmen", role: .destructive) { Task { await zustand.bestaetigen() } }
-            }
-            Button("Abbrechen", role: .cancel) { zustand.rueckfrage = nil }
-        } message: { rf in
-            Text(rf.warnungen.isEmpty ? "Das geschieht über die Datenbibliothek der Welt und steht danach in ihren Dateien." : rf.warnungen.joined(separator: "\n"))
+    func weltenRueckfrage(_ zustand: WeltenZustand, ort: WeltenZustand.RueckfrageOrt) -> some View {
+        background(WeltenRueckfrageAnker(zustand: zustand, ort: ort, frage: zustand.rueckfrageId)
+            .frame(width: 0, height: 0).allowsHitTesting(false).accessibilityHidden(true))
+    }
+}
+
+private struct WeltenRueckfrageAnker: NSViewRepresentable {
+    let zustand: WeltenZustand
+    let ort: WeltenZustand.RueckfrageOrt
+    let frage: UUID?
+
+    final class Anker: NSView {
+        var registrieren: ((NSWindow) -> Void)?
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if let window { registrieren?(window) }
         }
-        .alert("Wo soll die globale Welt liegen?", isPresented: Binding(get: { aktiv && zustand.weltNeuFrage != nil }, set: { if !$0, aktiv { zustand.weltNeuFrage = nil } }), presenting: zustand.weltNeuFrage) { f in
-            ForEach(f.wege, id: \.self) { m in
-                if m == f.vorgabe {
-                    Button("\(WeltenWorte.aufMaschine(m, satzanfang: true)) anlegen") { zustand.weltNeuFrage = nil; Task { await zustand.weltAnlegen(art: "global", maschine: m, echt: true) } }
-                        .keyboardShortcut(.defaultAction)
-                } else {
-                    Button("\(WeltenWorte.aufMaschine(m, satzanfang: true)) anlegen") { zustand.weltNeuFrage = nil; Task { await zustand.weltAnlegen(art: "global", maschine: m, echt: true) } }
-                }
-            }
-            Button("Abbrechen", role: .cancel) { zustand.weltNeuFrage = nil }
-        } message: { f in
-            Text(f.text)
+    }
+
+    func makeNSView(context: Context) -> Anker {
+        let v = Anker(frame: .zero)
+        v.registrieren = { fenster in
+            DispatchQueue.main.async { zustand.rueckfrageFensterRegistrieren(fenster, ort: ort) }
+        }
+        return v
+    }
+
+    func updateNSView(_ v: Anker, context: Context) {
+        if let fenster = v.window {
+            DispatchQueue.main.async { zustand.rueckfrageFensterRegistrieren(fenster, ort: ort) }
         }
     }
 }
@@ -1216,7 +1455,7 @@ struct WeltenMitteSpalte: View {
             AgentsFusszeile(nutzlast: kern.aufgaben)
         }
         .background(Color(nsColor: .windowBackgroundColor))
-        .weltenRueckfrage(zustand, aktiv: zustand.rueckfrageImTab)
+        .weltenRueckfrage(zustand, ort: .tab)
     }
 }
 
@@ -1320,31 +1559,50 @@ struct WeltenPausenschalter: View {
     private var gestoppt: Bool { stand == "gestoppt" }
 
     var body: some View {
-        Group {
-            if gestoppt || stand == "archiviert" {
-                HStack(spacing: 6) {
-                    Zustandspunkt(art: .aus)
-                    Text(stand == "archiviert" ? "archiviert" : "gestoppt").foregroundStyle(.secondary)
-                    if gestoppt {
-                        Button("Fortsetzen") { Task { await zustand.schalten(welt, agent: agent?.id, laeuft: true, echt: true) } }
-                    }
+        if gestoppt || stand == "archiviert" {
+            HStack(spacing: 6) {
+                Zustandspunkt(art: .aus)
+                Text(stand == "archiviert" ? "archiviert" : "gestoppt").foregroundStyle(.secondary)
+                if gestoppt {
+                    Button("Fortsetzen") { Task { await zustand.schalten(welt, agent: agent?.id, laeuft: true, echt: true) } }
                 }
-            } else {
-                Picker(agent == nil ? "Welt" : "Agent", selection: Binding(
-                    get: { stand == "pausiert" ? "pausiert" : "laeuft" },
-                    set: { neu in Task { await zustand.schalten(welt, agent: agent?.id, laeuft: neu == "laeuft", echt: true) } })) {
-                    Text("läuft").tag("laeuft")
-                    Text("pausiert").tag("pausiert")
+            }
+            .accessibilityLabel(beschriftung)
+            .accessibilityIdentifier(agent == nil ? "welten-pause" : "welten-agent-pause")
+        } else {
+            HStack(spacing: 8) {
+                schalter
+                    .accessibilityLabel(beschriftung)
+                    .accessibilityIdentifier(agent == nil ? "welten-pause" : "welten-agent-pause")
+                // Auftrag pausetext: pausiert heisst nicht still, solange ein Zug noch zu Ende arbeitet.
+                if let z = zusatz {
+                    Text(z).font(.callout).foregroundStyle(.secondary).fixedSize()
+                        .help(WeltenWorte.pauseZugSatz)
+                        .accessibilityIdentifier(agent == nil ? "welten-pause-zusatz" : "welten-agent-pause-zusatz")
                 }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .fixedSize()
-                .disabled(zustand.laufend.contains("pausieren") || zustand.laufend.contains("fortsetzen"))
-                .help(agent == nil ? "Pause hält jeden Agenten der Welt am nächsten Checkpoint an; nichts Neues startet." : "Pause hält \(agent!.name) am nächsten Checkpoint an.")
             }
         }
-        .accessibilityLabel(agent == nil ? "Welt \(welt.name): \(stand)" : "\(agent!.name): \(stand)")
-        .accessibilityIdentifier(agent == nil ? "welten-pause" : "welten-agent-pause")
+    }
+
+    private var zusatz: String? { WeltenWorte.pauseZusatz(welt, agent: agent) }
+    /// „Welt Kalender-App: pausiert – laufender Zug endet noch“ fuer VoiceOver.
+    private var beschriftung: String {
+        let s = zusatz.map { "\(stand) – \($0)" } ?? stand
+        return agent == nil ? "Welt \(welt.name): \(s)" : "\(agent!.name): \(s)"
+    }
+
+    private var schalter: some View {
+        Picker(agent == nil ? "Welt" : "Agent", selection: Binding(
+            get: { stand == "pausiert" ? "pausiert" : "laeuft" },
+            set: { neu in Task { await zustand.schalten(welt, agent: agent?.id, laeuft: neu == "laeuft", echt: true) } })) {
+            Text("läuft").tag("laeuft")
+            Text("pausiert").tag("pausiert")
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .fixedSize()
+        .disabled(zustand.laufend.contains("pausieren") || zustand.laufend.contains("fortsetzen"))
+        .help(WeltenWorte.pauseHilfe(welt, agent: agent))
     }
 }
 
@@ -1498,7 +1756,7 @@ struct WeltenAgentZeile: View {
                 }
                 HStack(spacing: 4) {
                     Zustandspunkt(art: WeltenWorte.punkt(agent: agent), basis: 7)
-                    WeltenLebenWort(agent: agent)
+                    WeltenLebenWort(agent: agent, zeile: true)
                     if !agent.spezialgebiet.isEmpty {
                         Text("· \(agent.spezialgebiet)").foregroundStyle(.secondary).lineLimit(1)
                     }
@@ -1509,9 +1767,9 @@ struct WeltenAgentZeile: View {
             WeltenZahl(n: ungelesen)
         }
         .padding(.vertical, 2)
-        .help(WeltenWorte.leben(agent) ?? agent.zustandText)
+        .help(WeltenWorte.pauseZeile(agent) ?? WeltenWorte.leben(agent) ?? agent.zustandText)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(agent.name), \(WeltenWorte.stufe(agent.stufe)), \(WeltenWorte.leben(agent) ?? agent.zustandText), \(agent.spezialgebiet)\(ungelesen > 0 ? ", \(ungelesen) ungelesen" : "")")
+        .accessibilityLabel("\(agent.name), \(WeltenWorte.stufe(agent.stufe)), \(WeltenWorte.pauseZeile(agent) ?? WeltenWorte.leben(agent) ?? agent.zustandText), \(agent.spezialgebiet)\(ungelesen > 0 ? ", \(ungelesen) ungelesen" : "")")
     }
 }
 
@@ -1548,9 +1806,13 @@ struct WeltenLebenWort: View {
     let agent: WeltAgent
     /// Ohne Lebenszeichen: statt des Zustandsworts der Zustandstext des Kerns („arbeitet an …").
     var ohneLeben: String? = nil
+    /// Zeile der Seitenleiste oder Karte: pausiert mit laufendem Zug heisst dort `WeltenWorte.pauseZeile`.
+    var zeile = false
 
     var body: some View {
-        if agent.leben?.stand == "arbeitet" {
+        if zeile, let z = WeltenWorte.pauseZeile(agent) {
+            Text(z)
+        } else if agent.leben?.stand == "arbeitet" {
             TimelineView(.periodic(from: .now, by: 1)) { tl in Text(WeltenWorte.agentWort(agent, jetzt: tl.date)) }
         } else if WeltenWorte.leben(agent) == nil, let ohneLeben {
             Text(ohneLeben)
@@ -2257,29 +2519,56 @@ enum WeltenTicketWorte {
     }
 }
 
-/// DAS BOARD (Plan Satz 47): Spalten in Bearbeitungsrichtung, je Vorhaben eine Swimlane,
-/// Zähler am Spaltenkopf und die WIP-Grenze der Welt über „läuft".
+/// DAS BOARD (Plan Satz 47, Auftrag ticketboard): Spalten in Bearbeitungsrichtung, je Vorhaben
+/// eine Swimlane, Zähler am Spaltenkopf und die WIP-Grenze der Welt über „läuft". Wie breit die
+/// Mitte ist, entscheidet über die Gestalt (`WeltenZustand.boardLage`): volle Spalten, leere als
+/// schmaler Streifen mit Titel und Zähler, und bei schmaler Mitte die Stände als Reiter mit einem
+/// Stand darunter. Waagerecht gerollt wird nie.
 struct WeltenTicketBoard: View {
     let welt: Welt
     let tickets: [WeltTicket]
     @Bindable var zustand: WeltenZustand
 
-    private let spaltenbreite: CGFloat = 220
+    private var zahlen: [String: Int] { WeltenZustand.boardZahlen(tickets) }
+    /// Die 32 Punkte sind der Rand des Boards links und rechts.
+    private var lage: WeltenZustand.BoardLage {
+        WeltenZustand.boardLage(breite: zustand.boardBreite - 32, zahlen: zahlen, offen: zustand.boardOffen)
+    }
+    private var offenerStand: String { WeltenZustand.boardStand(gewaehlt: zustand.boardSpalte, zahlen: zahlen) }
 
     var body: some View {
         let spuren = WeltenZustand.board(welt, tickets: tickets)
+        // Die waagerechte Achse bleibt am Rollbereich, damit die Spalten die MITTE nicht
+        // auseinanderdruecken: ein NSSplitView folgt der Mindestbreite seines Inhalts, und
+        // gemessen wuerde dann die aufgeblaehte Spalte statt des Platzes, der da ist. Gerollt
+        // wird trotzdem nie -- die Breiten sind so gerechnet, dass sie hineinpassen.
         ScrollView([.horizontal, .vertical]) {
             VStack(alignment: .leading, spacing: 16) {
                 kopfzeile
+                if lage.gestapelt {
+                    Text("Die Mitte ist zu schmal für alle Spalten: hier steht ein Stand nach dem anderen. Die Reiter wechseln den Stand.")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 if spuren.isEmpty {
                     Text("Kein Ticket in dieser Auswahl.").font(.callout).foregroundStyle(.secondary).padding(.leading, 4)
                 }
                 ForEach(spuren) { spur in
                     VStack(alignment: .leading, spacing: 8) {
                         Text(spur.titel).font(.headline).accessibilityAddTraits(.isHeader)
-                        HStack(alignment: .top, spacing: 12) {
-                            ForEach(Array(WeltenWorte.boardSpalten.enumerated()), id: \.offset) { i, spalte in
-                                spaltenInhalt(spur.spalten[i], spalte: spalte)
+                        if lage.gestapelt {
+                            let i = WeltenWorte.boardSpalten.firstIndex(of: offenerStand) ?? 0
+                            spaltenInhalt(spur.spalten[i], spalte: offenerStand, breite: nil)
+                        } else {
+                            HStack(alignment: .top, spacing: WeltenZustand.BoardMass.abstand) {
+                                ForEach(Array(WeltenWorte.boardSpalten.enumerated()), id: \.offset) { i, spalte in
+                                    if lage.schmal.contains(spalte) {
+                                        // Der Streifen steht im Kopf; in der Spur bleibt nur seine Breite.
+                                        Color.clear.frame(width: WeltenZustand.BoardMass.streifen, height: 1)
+                                    } else {
+                                        spaltenInhalt(spur.spalten[i], spalte: spalte, breite: lage.breite)
+                                    }
+                                }
                             }
                         }
                     }
@@ -2287,46 +2576,115 @@ struct WeltenTicketBoard: View {
                 }
             }
             .padding(16)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
+        // Erst die gezeichnete Fläche kennt ihre Breite; sie entscheidet über die Gestalt.
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { zustand.boardBreite = $0 }
         .accessibilityIdentifier("welten-board")
     }
 
-    private var kopfzeile: some View {
-        HStack(alignment: .bottom, spacing: 12) {
-            ForEach(WeltenWorte.boardSpalten, id: \.self) { spalte in
-                let anzahl = tickets.filter { WeltenWorte.boardStaende(spalte).contains($0.stand) }.count
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack(spacing: 5) {
-                        Zustandspunkt(art: WeltenWorte.punkt(ticket: spalte), basis: 7)
-                        Text(spalte).font(.callout.weight(.semibold)).lineLimit(1)
-                        Text("\(anzahl)").font(.callout).monospacedDigit().foregroundStyle(.secondary)
-                    }
-                    if spalte == "läuft" {
-                        let w = WeltenZustand.wipText(welt)
-                        Text(w.text)
-                            .font(.caption).monospacedDigit()
-                            .foregroundStyle(w.rot ? Color.orange : Color.secondary)
-                            .help("Weiche WIP-Grenze der Welt: laufende und geparkte Tickets gegen die Grenze")
-                            .accessibilityLabel("WIP-Grenze \(w.text)\(w.rot ? ", überschritten" : "")")
-                            .accessibilityIdentifier("welten-board-wip")
+    @ViewBuilder private var kopfzeile: some View {
+        if lage.gestapelt {
+            // Die Reiter brechen um, statt waagerecht zu rollen. Feste Spaltenzahl statt
+            // `.adaptive`: ein adaptives Raster laesst den Rest der Breite links und rechts
+            // stehen, die Reiter saessen dann eingerueckt statt am Rand.
+            let spaltenZahl = max(1, min(4, Int((zustand.boardBreite - 32) / 190)))
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: spaltenZahl), alignment: .leading, spacing: 6) {
+                ForEach(WeltenWorte.boardSpalten, id: \.self) { spalte in
+                    Button { zustand.boardSpalte = spalte } label: { reiter(spalte) }
+                        .buttonStyle(.plain)
+                        .accessibilityIdentifier("welten-board-reiter-\(spalte)")
+                }
+            }
+        } else {
+            HStack(alignment: .bottom, spacing: WeltenZustand.BoardMass.abstand) {
+                ForEach(WeltenWorte.boardSpalten, id: \.self) { spalte in
+                    if lage.schmal.contains(spalte) {
+                        streifen(spalte)
+                    } else {
+                        spaltenkopf(spalte).frame(width: lage.breite, alignment: .leading)
                     }
                 }
-                .frame(width: spaltenbreite, alignment: .leading)
             }
         }
     }
 
-    private func spaltenInhalt(_ inhalt: [WeltTicket], spalte: String) -> some View {
+    /// Der Kopf einer offenen Spalte: Punkt, Wort, Zähler und an „läuft" die WIP-Grenze.
+    private func spaltenkopf(_ spalte: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 5) {
+                Zustandspunkt(art: WeltenWorte.punkt(ticket: spalte), basis: 7)
+                Text(spalte).font(.callout.weight(.semibold)).lineLimit(1)
+                Text("\(zahlen[spalte] ?? 0)").font(.callout).monospacedDigit().foregroundStyle(.secondary)
+            }
+            if spalte == "läuft" { wipZeile }
+        }
+    }
+
+    /// Eine leere Spalte als Streifen: Zähler oben, Titel senkrecht; ein Klick zeigt ihren Stand.
+    private func streifen(_ spalte: String) -> some View {
+        Button {
+            zustand.boardOffen.insert(spalte)
+            zustand.boardSpalte = spalte
+        } label: {
+            VStack(spacing: 4) {
+                Text("\(zahlen[spalte] ?? 0)").font(.caption).monospacedDigit()
+                Text(spalte).font(.caption.weight(.semibold)).lineLimit(1).fixedSize()
+                    .rotationEffect(.degrees(-90))
+                    .frame(width: 14, height: 84)
+            }
+            .foregroundStyle(.secondary)
+            .frame(width: WeltenZustand.BoardMass.streifen)
+            .padding(.vertical, 6)
+            .background(RoundedRectangle(cornerRadius: 10).fill(.quaternary.opacity(0.5)))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("Die Spalte \(spalte) ist leer. Ein Klick zeigt ihren Stand.")
+        .accessibilityLabel("Spalte \(spalte), leer, zusammengeklappt")
+        .accessibilityIdentifier("welten-board-streifen-\(spalte)")
+    }
+
+    /// Ein Reiter der gestapelten Ansicht: Punkt, Wort, Zähler, an „läuft" die WIP-Grenze.
+    private func reiter(_ spalte: String) -> some View {
+        let gewaehlt = spalte == offenerStand
+        return HStack(spacing: 5) {
+            Zustandspunkt(art: WeltenWorte.punkt(ticket: spalte), basis: 7)
+            Text(spalte).font(.callout.weight(.semibold)).lineLimit(1)
+            Text("\(zahlen[spalte] ?? 0)").font(.callout).monospacedDigit().foregroundStyle(.secondary)
+            if spalte == "läuft" { wipZeile }
+        }
+        .padding(.horizontal, 9).padding(.vertical, 4)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 10).fill(gewaehlt ? AnyShapeStyle(Color.accentColor.opacity(0.18)) : AnyShapeStyle(.quaternary.opacity(0.5))))
+        .contentShape(Rectangle())
+        .accessibilityAddTraits(gewaehlt ? [.isButton, .isSelected] : .isButton)
+    }
+
+    private var wipZeile: some View {
+        let w = WeltenZustand.wipText(welt)
+        return Text(w.text)
+            .font(.caption).monospacedDigit()
+            .foregroundStyle(w.rot ? Color.orange : Color.secondary)
+            .help("Weiche WIP-Grenze der Welt: laufende und geparkte Tickets gegen die Grenze")
+            .accessibilityLabel("WIP-Grenze \(w.text)\(w.rot ? ", überschritten" : "")")
+            .accessibilityIdentifier("welten-board-wip")
+    }
+
+    /// `breite: nil` heisst: der Stand steht allein und nimmt die ganze Breite (gestapelt).
+    private func spaltenInhalt(_ inhalt: [WeltTicket], spalte: String, breite: CGFloat?) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             ForEach(inhalt) { t in
                 Button { zustand.ticketAuswahl = t.id } label: { kachel(t) }
                     .buttonStyle(.plain)
             }
             if inhalt.isEmpty {
-                Text("–").font(.caption).foregroundStyle(.tertiary).frame(maxWidth: .infinity, alignment: .leading)
+                Text(lage.gestapelt ? "Kein Ticket in diesem Stand." : "–")
+                    .font(.caption).foregroundStyle(.tertiary).frame(maxWidth: .infinity, alignment: .leading)
             }
         }
-        .frame(width: spaltenbreite, alignment: .topLeading)
+        .frame(width: breite, alignment: .topLeading)
+        .frame(maxWidth: breite == nil ? .infinity : nil, alignment: .topLeading)
     }
 
     private func kachel(_ t: WeltTicket) -> some View {
@@ -2574,6 +2932,7 @@ struct WeltenTicketDetail: View {
         case .umadressieren: "Umadressieren …"
         case .grenzen: "Grenzen ändern …"
         case .pruefer: "Prüfer setzen …"
+        case .abnehmen: "Abnehmen …"
         }
     }
 
@@ -2635,6 +2994,8 @@ struct WeltenTicketDetail: View {
                 .accessibilityIdentifier("welten-pruefer-wahl")
                 Text("Der Prüfer bekommt einen Zug ohne Schreibwerkzeuge mit dem Diff des genannten Commits.")
                     .font(.caption).foregroundStyle(.secondary)
+            case .abnehmen:
+                abnahmeFormular(bindung, e)
             }
             HStack(spacing: 8) {
                 Spacer()
@@ -2682,6 +3043,7 @@ struct WeltenTicketDetail: View {
         case .umadressieren: "Umadressieren"
         case .grenzen: "Grenzen setzen"
         case .pruefer: "Prüfung anfordern"
+        case .abnehmen: "Abnehmen"
         }
     }
 
@@ -2693,6 +3055,7 @@ struct WeltenTicketDetail: View {
         case .umadressieren: return !e.an.isEmpty && !e.grund.trimmingCharacters(in: .whitespaces).isEmpty
         case .grenzen: return !e.frist.isEmpty || !e.runden.isEmpty
         case .pruefer: return !e.pruefer.isEmpty
+        case .abnehmen: return WeltenZustand.abnahmeFehlt(e, dod: welt.dod) == nil
         }
     }
 
@@ -2704,6 +3067,38 @@ struct WeltenTicketDetail: View {
         case .umadressieren: await zustand.umadressieren(welt, echt: true)
         case .grenzen: await zustand.grenzenSetzen(welt, echt: true)
         case .pruefer: await zustand.prueferSetzen(welt, echt: true)
+        case .abnehmen: await zustand.abnehmen(welt, echt: true)
+        }
+    }
+
+    /// Das Formular der Abnahme: Grund, Bemerkung und, wenn die Welt eine hat, die Definition of Done.
+    @ViewBuilder
+    private func abnahmeFormular(_ b: Binding<WeltenZustand.TicketHandlungEntwurf>, _ e: WeltenZustand.TicketHandlungEntwurf) -> some View {
+        Picker("Grund", selection: b.grund) {
+            ForEach(WeltenZustand.abnahmeGruende, id: \.self) { Text(WeltenWorte.abnahmeGrund($0)).tag($0) }
+        }
+        .accessibilityIdentifier("welten-abnehmen-grund")
+        TextField(e.grund == "teilweise" ? "Bemerkung: was offen bleibt" : "Bemerkung (freiwillig)", text: b.bemerkung, axis: .vertical)
+            .lineLimit(1...3)
+            .accessibilityIdentifier("welten-abnehmen-bemerkung")
+        if !welt.dod.isEmpty {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Definition of Done der Welt").font(.callout.weight(.semibold))
+                ForEach(Array(welt.dod.enumerated()), id: \.offset) { _, p in
+                    Label(p, systemImage: e.dodGeprueft ? "checkmark.circle.fill" : "circle")
+                        .font(.callout)
+                        .foregroundStyle(e.dodGeprueft ? .primary : .secondary)
+                }
+                Toggle("Definition of Done geprüft", isOn: b.dodGeprueft)
+                    .toggleStyle(.checkbox)
+                    .accessibilityIdentifier("welten-abnehmen-dod")
+            }
+        }
+        Text("Die Abnahme ist endgültig: „\(ticket.titel)“ gilt danach als erledigt. Zurückholen geht nur mit einer Rückgabe.")
+            .font(.caption).foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+        if let fehlt = WeltenZustand.abnahmeFehlt(e, dod: welt.dod), e.bemerkung.contains("|") || e.grund == "teilweise" {
+            Text(fehlt).font(.caption).foregroundStyle(.orange)
         }
     }
 
@@ -3143,7 +3538,7 @@ struct WeltenInspektor: View {
                     TextField("Spezialgebiet", text: e.spezialgebiet, axis: .vertical).lineLimit(1...3)
                 }
                 formzeile("Modell") {
-                    TextField("z. B. sonnet5:high", text: e.modell).font(.callout.monospaced())
+                    TextField("z. B. sonnet:high", text: e.modell).font(.callout.monospaced())
                         .accessibilityIdentifier("welten-profil-modell")
                 }
                 formzeile("Denkstufe") {
@@ -3164,7 +3559,7 @@ struct WeltenInspektor: View {
                     .disabled(e.wrappedValue.fallback.trimmingCharacters(in: .whitespaces).isEmpty)
                 }
                 formzeile("Maschine") {
-                    TextField("peer, ltfserver, mac …", text: e.maschine)
+                    TextField("server.example.org, mac …", text: e.maschine)
                 }
                 Label("Ein Modellwechsel gilt ab dem nächsten Start; ein laufender Zug behält sein Modell. Der Verlauf nennt jede Änderung.", systemImage: "info.circle")
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
@@ -3460,6 +3855,15 @@ extension WeltenZustand {
                                    "inspektor": inspektorOffen, "ticketFilter": ticketFilter, "ticketAuswahl": ticketAuswahl ?? ""]
         raus["meldung"] = meldung.map { ["text": $0.text, "ok": $0.ok] as [String: Any] } ?? [:]
         raus["rueckfrage"] = rueckfrage.map { ["handlung": $0.handlung, "text": $0.text, "warnungen": $0.warnungen] as [String: Any] } ?? [:]
+        raus["rueckfrageOrt"] = rueckfrageOrt?.rawValue ?? ""
+        // Anzahl einschliesslich der vordersten; wartend sind nur die Eintraege dahinter.
+        raus["rueckfrageAnzahl"] = rueckfragen.count
+        raus["rueckfrageWartend"] = max(0, rueckfragen.count - 1)
+        raus["rueckfrageId"] = rueckfrageId?.uuidString ?? ""
+        raus["rueckfrageSheetId"] = rueckfrageSheetId?.uuidString ?? ""
+        raus["rueckfrageDaten"] = rueckfrage?.daten ?? [:]
+        raus["fensterVorn"] = fensterVorn
+        raus["tabSichtbar"] = tabSichtbar
         switch Self.lage(kern) {
         case .offline(let g): raus["lage"] = "offline"; raus["lageText"] = g
         case .ladend: raus["lage"] = "ladend"
@@ -3479,7 +3883,8 @@ extension WeltenZustand {
         raus["welt"] = ["name": w.name, "pfad": w.pfad, "stand": w.stand, "zaehler": WeltenWorte.zaehlerGetrennt(w), "hauptagent": w.hauptagent ?? "",
                         "maschine": w.maschine, "fern": w.fern, "ablage": w.ablage, "herkunft": WeltenWorte.herkunft(w),
                         "verbindung": ["ok": w.verbindungOk, "seit": w.verbindungSeit ?? "", "text": w.verbindungText] as [String: Any],
-                        "traeger": WeltenWorte.traeger(w), "hinweis": WeltenWorte.maschinenHinweis(w) ?? ""] as [String: Any]
+                        "traeger": WeltenWorte.traeger(w), "hinweis": WeltenWorte.maschinenHinweis(w) ?? "",
+                        "pauseZusatz": WeltenWorte.pauseZusatz(w, agent: nil) ?? "", "pauseHilfe": WeltenWorte.pauseHilfe(w, agent: nil)] as [String: Any]
         raus["maschinen"] = n.maschinen.map { ["name": $0.name, "eigene": $0.eigene, "traeger": $0.traeger, "erreichbar": $0.erreichbar.map { $0 ? "ja" : "nein" } ?? "unbekannt",
                                                "welten": $0.welten] as [String: Any] }
         raus["maschineVorgabe"] = WeltenZustand.maschineVorgabe(n.maschinen, vorgabe: n.maschineVorgabe)
@@ -3502,13 +3907,14 @@ extension WeltenZustand {
                 return ["art": "agent", "id": z.id, "name": a?.name ?? id, "ebene": ebene, "stufe": a?.stufe ?? "", "team": teamZusatz ? (a?.team ?? "") : "",
                         "zustand": WeltenWorte.zustand(a?.zustand ?? ""), "text": a?.zustandText ?? "", "ungelesen": ungelesen(w, agent: id),
                         "figur": a.map { FigurArt.fuer(rolle: $0.figurRolle, team: $0.figurTeam, arten: $0.arten).rawValue } ?? "",
-                        "figurZustand": a?.figur.rawValue ?? "", "wort": a.map { WeltenWorte.agentWort($0) } ?? "", "ring": a?.ring.rawValue ?? "",
+                        "figurZustand": a?.figur.rawValue ?? "", "wort": a.map { WeltenWorte.zeilenWort($0) } ?? "", "ring": a?.ring.rawValue ?? "",
                         "zug": a.map { Self.zugAuskunft($0) } ?? NSNull()]
             }
         }
         let a = w.agent(agentId)
         raus["kopf"] = a.map { ["name": $0.name, "stufe": WeltenWorte.stufe($0.stufe), "modell": $0.modell, "maschine": $0.maschine, "zug": $0.zustandText,
-                                "leben": WeltenWorte.leben($0) ?? "", "ring": $0.ring.rawValue] as [String: Any] }
+                                "leben": WeltenWorte.leben($0) ?? "", "ring": $0.ring.rawValue,
+                                "pauseZusatz": WeltenWorte.pauseZusatz(w, agent: $0) ?? "", "pauseHilfe": WeltenWorte.pauseHilfe(w, agent: $0)] as [String: Any] }
             ?? (auswahl == Self.uebersicht ? ["name": "Übersicht", "welt": w.name] : ["name": "Kanal", "nachrichten": w.kanalGesamt]) as [String: Any]
         raus["gespraeche"] = a.map { agent in [Self.einzel] + agent.direktchats } ?? []
         let k = gespraechSchluessel()
@@ -3555,7 +3961,7 @@ extension WeltenZustand {
         raus["ticketHandlung"] = ticketHandlung.map {
             ["ticket": $0.ticket, "handlung": $0.handlung.rawValue, "grund": $0.grund, "bemerkung": $0.bemerkung,
              "duplikat": $0.duplikat, "an": $0.an, "pruefer": $0.pruefer, "art": $0.kind, "prioritaet": $0.prioritaet,
-             "punkte": $0.fertigPunkte, "frist": $0.frist, "runden": $0.runden] as [String: Any]
+             "punkte": $0.fertigPunkte, "frist": $0.frist, "runden": $0.runden, "dodGeprueft": $0.dodGeprueft] as [String: Any]
         } ?? [:]
         raus["ticketFormular"] = neuesTicket.map { e -> [String: Any] in
             let punkte = e.fertigPunkte.filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
@@ -3573,6 +3979,13 @@ extension WeltenZustand {
         raus["weltDod"] = w.dod
         raus["weltWip"] = ["laufend": w.wip.laufend, "grenze": w.wip.grenze, "text": Self.wipText(w).text, "rot": Self.wipText(w).rot] as [String: Any]
         raus["backlog"] = Self.backlog(w).map(\.id)
+        // Auftrag ticketboard: wie das Board in die Mitte passt (Spalten, Streifen, gestapelt).
+        let boardZahlen = Self.boardZahlen(tickets(w))
+        let boardLage = Self.boardLage(breite: boardBreite - 32, zahlen: boardZahlen, offen: boardOffen)
+        raus["boardLage"] = ["modus": boardLage.gestapelt ? "gestapelt" : "spalten",
+                             "breite": Int(boardLage.breite), "schmal": boardLage.schmal,
+                             "gewaehlt": Self.boardStand(gewaehlt: boardSpalte, zahlen: boardZahlen),
+                             "gemessen": Int(boardBreite)] as [String: Any]
         raus["board"] = Self.board(w, tickets: tickets(w)).map { spur -> [String: Any] in
             ["id": spur.id, "titel": spur.titel,
              "spalten": zip(WeltenWorte.boardSpalten, spur.spalten).map { name, inhalt in

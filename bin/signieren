@@ -1,0 +1,56 @@
+#!/bin/bash
+# signieren <Buendel.app> -- signiert die Mac-native Werkbank mit einer
+# STABILEN Identitaet, damit macOS die Freigaben (Schreibtisch, Dokumente,
+# Bildschirmaufnahme ...) ueber Neubauten hinweg behaelt.
+#
+# Warum (gemessen 09.10.2026, tcc-stabil): TCC merkt sich eine Freigabe zum
+# Designated Requirement (DR) der App. Ad hoc signiert lautet das DR
+# `cdhash H"..."` -- jeder Neubau hat einen anderen cdhash, macOS erkennt die
+# App nicht wieder und fragt alles neu. Mit einem Zertifikat lautet das DR
+# `identifier "agent-workbench.werkbank" and certificate leaf = H"<Zertifikat>"`,
+# und das bleibt gleich, solange Bundle-ID und Zertifikat gleich bleiben
+# (Apple TN3127). Die Werkbank ist dabei die "responsible" App fuer alles,
+# was in ihren Terminals laeuft (claude, Shells, wb-shot, das Kern-Electron):
+# deren Zugriffe fragt macOS fuer Werkbank.app an.
+#
+# Reihenfolge der Identitaet:
+#   1. $WB_SIGN_ID, wenn gesetzt ("-" erzwingt ad hoc)
+#   2. "Werkbank Dev"  (eigenes selbstsigniertes Zertifikat, docs/MAC-SIGNATUR.md)
+#   3. "Local Dev"   (vorhandenes selbstsigniertes Zertifikat dieses Macs)
+#   4. ad hoc, mit Warnung: auf einem Mac ohne Zertifikat (anderer Mac) laeuft
+#      alles wie bisher, nur fragt macOS nach jedem Neubau erneut.
+# Ein Wechsel der Identitaet aendert das DR EINMAL (eine Fragerunde), danach
+# bleibt es stabil.
+set -euo pipefail
+APP="${1:?Aufruf: signieren <Buendel.app>}"
+
+identitaet_da() {
+  # Ohne -v: auch ein Zertifikat ohne Vertrauenseinstellung signiert; das DR
+  # haengt am Hash des Blattzertifikats, nicht an der Vertrauenskette.
+  security find-identity -p codesigning 2>/dev/null | grep -qF "\"$1\""
+}
+
+ID=""
+if [ -n "${WB_SIGN_ID:-}" ]; then
+  ID="$WB_SIGN_ID"
+else
+  for kandidat in "Werkbank Dev" "Local Dev"; do
+    identitaet_da "$kandidat" && { ID="$kandidat"; break; }
+  done
+fi
+
+if [ -z "$ID" ] || [ "$ID" = "-" ]; then
+  echo "signieren: kein Signierzertifikat (Werkbank Dev / Local Dev) -- ad hoc signiert." >&2
+  echo "signieren: macOS fragt nach jedem Neubau erneut nach Freigaben; Abhilfe: docs/MAC-SIGNATUR.md" >&2
+  codesign --force --deep --sign - "$APP"
+  exit 0
+fi
+
+# --timestamp=none: kein Netzzugriff auf Apples Zeitstempeldienst, der fuer
+# ein selbstsigniertes Zertifikat ohnehin nichts beitraegt.
+if ! codesign --force --deep --timestamp=none --sign "$ID" "$APP"; then
+  echo "signieren: Signatur mit \"$ID\" fehlgeschlagen -- Rueckfall ad hoc (Freigaben gehen beim naechsten Neubau verloren)." >&2
+  codesign --force --deep --sign - "$APP"
+  exit 0
+fi
+echo "signieren: $APP mit \"$ID\" -- $(codesign -dr - "$APP" 2>/dev/null | sed -n 's/^designated => //p')" >&2

@@ -101,6 +101,10 @@ final class MacSteuerkanal {
         case "ping":
             return MacSteuerantwort.ok(["pid": Int(getpid()), "kopflos": optionen.kopflos, "terminal": optionen.terminal.rawValue])
 
+        case "vorholen":
+            // Ein zweiter Start mit demselben Laufverzeichnis bittet diese App nach vorn (Einzelinstanz.swift).
+            return MacSteuerantwort.ok(Einzelinstanz.vorgeholtWerden(fenster.fenster, optionen: optionen))
+
         case "ui":
             // Die Auskunft des Editors ist asynchron (Schnittstelle EditorBaustein); vorher lesen.
             editorAuskunft = await editor?.ansicht.auskunft() ?? ["gebaut": false]
@@ -171,6 +175,19 @@ final class MacSteuerkanal {
             } catch {
                 return MacSteuerantwort.fehler("Bild nicht geschrieben: \(error.localizedDescription)")
             }
+
+        // Ein Rad-Ereignis in eine Kachel (Auftrag rollrad): scroll <pane|-> <zeilen> [shift] [praezise].
+        // Die Argumente kommen ueber den allgemeinen Weg als arg1, arg2, … an.
+        case "scroll":
+            let pane = b.text["arg1"].map { $0 == "-" ? "" : $0 } ?? ""
+            guard let zeilen = b.text["arg2"].flatMap({ Int($0) }), zeilen != 0 else {
+                return MacSteuerantwort.fehler("scroll <pane|-> <zeilen> [shift] [praezise] erwartet, zeilen > 0 rollt hoch")
+            }
+            let rest = [b.text["arg3"], b.text["arg4"]].compactMap { $0 }
+            guard let r = fenster.terminal.radGeben(pane: pane, zeilen: zeilen, shift: rest.contains("shift"), praezise: rest.contains("praezise")) else {
+                return MacSteuerantwort.fehler("kein Terminal fuer Pane \(pane.isEmpty ? "(aktiv)" : pane) auf der Buehne")
+            }
+            return MacSteuerantwort.ok(r)
 
         case "latenz":
             let n = b.zahl["n"] ?? 20
@@ -275,6 +292,9 @@ final class MacSteuerkanal {
             let geht = (punkt.target as? NSMenuItemValidation)?.validateMenuItem(punkt) ?? punkt.isEnabled
             let kuerzel = Fenster.kuerzelText(punkt)
             guard geht else { return MacSteuerantwort.ok(["ausgeloest": false, "grau": true, "kuerzel": punkt.keyEquivalent, "kuerzelText": kuerzel]) }
+            // Kein Mensch drueckt hier: der Punkt „Freigeben" gibt dann nicht frei.
+            fenster.menueVomSteuerkanal = true
+            defer { fenster.menueVomSteuerkanal = false }
             menue.performActionForItem(at: index)
             return MacSteuerantwort.ok(["ausgeloest": true, "kuerzel": punkt.keyEquivalent, "kuerzelText": kuerzel])
 
@@ -308,8 +328,14 @@ final class MacSteuerkanal {
             // Ueber einen Antrag (pfad) oder eine Rueckfrage (schluessel)
             // entscheiden -- derselbe Weg wie die Knoepfe der Leiste und des
             // Blatts (Fenster.entscheiden), mit Begruendung. Ein Annehmen einer
-            // Rueckfrage traegt hier KEINEN Menschen (`echt` = kopflos), der
-            // Kern erteilt es dann nicht; Ablehnen darf jeder.
+            // Rueckfrage traegt hier KEINEN Menschen (`echt: false`, auch in der
+            // sichtbaren App -- Befund 13.10.2026: vorher erbte es `!kopflos`
+            // und gab als Mensch frei), der Kern erteilt es dann nicht.
+            // Ablehnen eines ANTRAGS braucht seit 14.10.2026 ebenfalls einen echten
+            // Klick (Kern: decideRequest, Commit 69444a4e); der Steuerkanal traegt
+            // keinen, also antwortet er hier mit einem Fehler statt "ok" ohne Wirkung.
+            // Eine Rueckfrage (muster-entscheiden) darf der Kern weiter ohne Klick
+            // ablehnen.
             let kennung = b.text[b.cmd == "entscheiden" ? "pfad" : "schluessel"] ?? ""
             guard !kennung.isEmpty else { return MacSteuerantwort.fehler("Feld \(b.cmd == "entscheiden" ? "pfad" : "schluessel") fehlt") }
             guard let aktion = b.text["aktion"], aktion == "approve" || aktion == "reject" else {
@@ -319,7 +345,10 @@ final class MacSteuerkanal {
             guard let f = offene.first(where: { b.cmd == "entscheiden" ? ($0.art == .antrag && $0.pfad == kennung) : ($0.art == .rueckfrage && $0.schluessel == kennung) }) else {
                 return MacSteuerantwort.fehler("kein offener Eintrag \(kennung) -- schon entschieden oder noch nicht angekommen")
             }
-            fenster.entscheiden(f, annehmen: aktion == "approve", grund: b.text["grund"] ?? "")
+            if f.art == .antrag && aktion == "reject" {
+                return MacSteuerantwort.fehler("Ablehnen eines Antrags geht nur mit einem echten Klick im Fenster -- der Steuerkanal traegt keinen; der Orchestrator entscheidet mit wb-decide")
+            }
+            fenster.entscheiden(f, annehmen: aktion == "approve", grund: b.text["grund"] ?? "", echt: false)
             return MacSteuerantwort.ok(["wer": f.wer, "aktion": aktion, "grund": b.text["grund"] ?? ""])
 
         case "grund":
@@ -505,9 +534,18 @@ final class MacSteuerkanal {
             let z = fenster.weltenZustand
             let wf = tab ? nil : fenster.weltenBauen()
             let ziel = wf?.fenster ?? fenster.fenster
-            let auskunft = {
-                tab ? MacSteuerantwort.ok(["agents": self.fenster.agentsAuskunft()])
-                    : MacSteuerantwort.ok(["welten": z.auskunft(kern: self.kern, sichtbar: wf?.sichtbar ?? false)])
+            let auskunft = { () -> Data in
+                var a = tab ? self.fenster.agentsAuskunft() : z.auskunft(kern: self.kern, sichtbar: wf?.sichtbar ?? false)
+                // Welches Fenster gerade ein Sheet traegt (Auftrag rueckfrage-besitzer): das Hauptfenster
+                // fuer den Tab „Agents", das Fenster „Agents-Welten …" fuer sich.
+                a["blaetter"] = ["haupt": self.fenster.fenster.attachedSheet != nil,
+                                 "welten": self.fenster.welten?.fenster.attachedSheet != nil]
+                if let sheet = z.rueckfrageSheet, sheet.window.isVisible {
+                    a["rueckfrageSheet"] = ["fenster": sheet.window.windowNumber,
+                                           "titel": sheet.messageText, "text": sheet.informativeText,
+                                           "knoepfe": sheet.buttons.map(\.title)] as [String: Any]
+                } else { a["rueckfrageSheet"] = [String: Any]() }
+                return MacSteuerantwort.ok([tab ? "agents" : "welten": a])
             }
             let was = b.text["was"] ?? ""
             let wert = b.text["wert"] ?? ""
@@ -524,6 +562,7 @@ final class MacSteuerkanal {
                     // (regeln/tests-und-eingriffe.md); das Belegbild zeichnet es auch verdeckt.
                     if !optionen.kopflos, optionen.ohneFokus { fenster.fenster.orderBack(nil) }
                 }
+                z.rueckfrageFensterRegistrieren(ziel, ort: tab ? .tab : .fenster)
                 return auskunft()
             case "schliessen":
                 if let wf { wf.fenster.performClose(nil) } else { fenster.modusSetzen(.code) }
@@ -571,7 +610,92 @@ final class MacSteuerkanal {
                 z.blatt = bl
                 return auskunft()
             case "inspektor": z.inspektorOffen = wert != "aus"; return auskunft()
-            case "abbrechen": z.rueckfrage = nil; return auskunft()
+            case "board-breite":
+                guard optionen.pruefmodus, let breite = Double(wert), breite > 0 else {
+                    return MacSteuerantwort.fehler("\(befehl) board-breite <punkte> gibt es nur im Pruefmodus")
+                }
+                // Kopflos koennen das Vorab-Fenster und der Tab gleichzeitig
+                // aufgebaut sein. Beide schreiben ihre SwiftUI-Geometrie in
+                // denselben Zustand; fuer die deterministische Layoutprobe setzt
+                // der Testtreiber deshalb den bereits produktiv ausgewerteten
+                // Eingangswert unmittelbar vor der Auskunft.
+                z.boardBreite = CGFloat(breite)
+                return auskunft()
+            case "abbrechen":
+                if optionen.kopflos { z.rueckfrageAbbrechen() }
+                else if z.rueckfrageId != nil, !(await rueckfrageKnopf(z, abbrechen: true)) {
+                    return MacSteuerantwort.fehler("Rueckfrage-Sheet konnte nicht abgebrochen werden")
+                }
+                return auskunft()
+            case "bestaetigen":
+                guard z.rueckfrageId != nil else { return MacSteuerantwort.fehler("keine offene Rueckfrage") }
+                if optionen.kopflos { await z.bestaetigen() }
+                else if !(await rueckfrageKnopf(z, abbrechen: false)) {
+                    return MacSteuerantwort.fehler("Rueckfrage-Sheet konnte nicht bestaetigt werden")
+                }
+                return auskunft()
+            case "rueckfrage-knopf":
+                // Testtreiber: einen benannten Knopf des vordersten Sheets ausloesen,
+                // ohne Fokuswechsel und ohne einen neuen Menschenabsender zu erfinden.
+                guard optionen.pruefmodus, await rueckfrageKnopf(z, abbrechen: wert == "Abbrechen", titel: wert) else {
+                    return MacSteuerantwort.fehler("kein solcher Rueckfrage-Knopf im Pruefmodus")
+                }
+                return auskunft()
+            case "rueckfrage-probe":
+                // Nur im Pruefmodus: die zweite Rueckfrageart ohne Maschinenprobe
+                // oder neue Welt testen. Keine Anlege-Knoepfe, nur Abbrechen.
+                guard optionen.pruefmodus, wert == "welt-neu" else {
+                    return MacSteuerantwort.fehler("rueckfrage-probe welt-neu gibt es nur im Pruefmodus")
+                }
+                z.rueckfrageEinreihen(.weltNeu(WeltenZustand.WeltNeuFrage(name: "Global", wege: [], vorgabe: "", text: "Test der Maschinenwahl.")))
+                return auskunft()
+            case "vorn":
+                // welten vorn an|aus -- nur im Pruefmodus: das Fenster „Agents-Welten …" wird Schluesselfenster
+                // oder gibt es ab, ueber dieselben Delegatenaufrufe wie beim Fokuswechsel, aber ohne den Fokus
+                // des Menschen zu nehmen (Auftrag rueckfrage-besitzer: Fensterwechsel bei offener Rueckfrage).
+                guard optionen.pruefmodus, let wf, wert == "an" || wert == "aus" else {
+                    return MacSteuerantwort.fehler("welten vorn an|aus gibt es nur im Pruefmodus und nur am Fenster")
+                }
+                if wert == "an" {
+                    wf.windowDidBecomeKey(Notification(name: NSWindow.didBecomeKeyNotification, object: wf.fenster))
+                } else {
+                    wf.windowDidResignKey(Notification(name: NSWindow.didResignKeyNotification, object: wf.fenster))
+                }
+                return auskunft()
+            case "spalte", "peek":
+                // spalte seite|inspektor zu|auf|breite-<n>, peek seite|inspektor [ms] [zeitgeber|direkt] -- nur im Pruefmodus, an einem
+                // sichtbaren Fenster (Auftrag app-absturz-peek, 11.10.2026): der Hover-Peek einer
+                // eingeklappten Spalte ueber denselben Weg wie der Zeiger am Rand (Spaltenprobe).
+                guard optionen.pruefmodus, wert == "seite" || wert == "inspektor" else {
+                    return MacSteuerantwort.fehler("\(befehl) spalte|peek seite|inspektor gibt es nur im Pruefmodus")
+                }
+                if was == "spalte" {
+                    if arg.hasPrefix("breite-"), let n = Double(arg.dropFirst(7)) {
+                        guard Spaltenprobe.breiteSetzen(ziel, inspektor: wert == "inspektor", breite: CGFloat(n)) else {
+                            return MacSteuerantwort.fehler("keine offene Spalte \(wert) im Fenster")
+                        }
+                        try? await Task.sleep(for: .milliseconds(300))
+                        return MacSteuerantwort.ok(["spalten": Spaltenprobe.auskunft(ziel)])
+                    }
+                    if arg.hasPrefix("verhalten-"), let n = Int(arg.dropFirst(10)), let (_, i) = Spaltenprobe.item(ziel, inspektor: wert == "inspektor") {
+                        i.collapseBehavior = NSSplitViewItem.CollapseBehavior(rawValue: n) ?? .default
+                        return MacSteuerantwort.ok(["spalten": Spaltenprobe.auskunft(ziel)])
+                    }
+                    guard arg == "zu" || arg == "auf" else { return MacSteuerantwort.fehler("\(befehl) spalte \(wert) zu|auf") }
+                    guard Spaltenprobe.klappen(ziel, inspektor: wert == "inspektor", zu: arg == "zu") else {
+                        return MacSteuerantwort.fehler("keine solche Spalte im Fenster")
+                    }
+                    try? await Task.sleep(for: .milliseconds(600))
+                    ziel.layoutIfNeeded()
+                    return MacSteuerantwort.ok(["spalten": Spaltenprobe.auskunft(ziel)])
+                }
+                let vorher = ziel.frame
+                let teile = arg.split(separator: " ").map(String.init)
+                let weg = Spaltenprobe.peek(ziel, inspektor: wert == "inspektor", direkt: teile.contains("direkt"), zeitgeber: teile.contains("zeitgeber"))
+                try? await Task.sleep(for: .milliseconds(teile.compactMap { Int($0) }.first ?? 1500))
+                let nachher = ziel.frame
+                return MacSteuerantwort.ok(["weg": weg, "spalten": Spaltenprobe.auskunft(ziel),
+                                            "rahmenVorher": [vorher.width, vorher.height], "rahmenNachher": [nachher.width, nachher.height]])
             case "welt-neu":
                 // agents welt-neu global | agents welt-neu <ordner> [name] -- derselbe Weg wie das Menue
                 // der Welten und die Einladung, nur mit dem Ordner als Text statt des Dialogs.
@@ -604,14 +728,14 @@ final class MacSteuerkanal {
             default: break
             }
             let weltBefehle = ["welt", "waehlen", "klappen", "gespraech", "adressen", "senden", "antworten", "zuruecknehmen", "pause", "stoppen", "umziehen",
-                               "bestaetigen", "ticket", "ticketfilter", "ticket-neu", "quittieren", "rueckgabe", "zurueckgeben", "profil",
+                               "ticket", "ticketfilter", "ticket-neu", "quittieren", "rueckgabe", "zurueckgeben", "profil",
                                "profil-feld", "gedaechtnis", "gedaechtnis-text", "anlegen", "anlegen-feld", "rechte", "rechte-feld",
                                "skill-abnehmen", "skill-ablehnen", "skill-zeigen",
                                // tickets4: Ansicht, Ticketformular, Handlungen am Ticket, Backlog und die Regeln der Welt
                                "ticketansicht", "ticket-feld", "ticket-handlung", "ticket-handlung-feld", "ticket-handlung-tun",
                                "backlog", "regeln", "regel-feld", "zyklus", "dod-sichern", "wip-setzen"]
             guard weltBefehle.contains(was) else {
-                return MacSteuerantwort.fehler("\(befehl) kennt zeigen|schliessen|fenster|schuss|sichtbaum|erscheinung|darstellung|reiter|blatt|inspektor|abbrechen|welt-neu|welt-neu-auf|maschinen|vergessen|\(weltBefehle.joined(separator: "|"))")
+                return MacSteuerantwort.fehler("\(befehl) kennt zeigen|schliessen|fenster|schuss|sichtbaum|erscheinung|darstellung|reiter|blatt|inspektor|abbrechen|bestaetigen|vorn|welt-neu|welt-neu-auf|maschinen|vergessen|\(weltBefehle.joined(separator: "|"))")
             }
             guard let n = kern.welten, let w = z.welt(n) else { return MacSteuerantwort.fehler("noch keine Welt vom Kern") }
             switch was {
@@ -655,9 +779,6 @@ final class MacSteuerkanal {
                 // agents umziehen <maschine> [trocken] -- ohne trocken prueft der Kern und fragt zurueck; `bestaetigen` zieht um.
                 guard !wert.isEmpty else { return MacSteuerantwort.fehler("\(befehl) umziehen <maschine> [trocken]") }
                 await z.umziehen(w, nach: wert, trocken: arg == "trocken", echt: false)
-            case "bestaetigen":
-                guard z.rueckfrage != nil else { return MacSteuerantwort.fehler("keine offene Rueckfrage") }
-                await z.bestaetigen()
             case "ticket":
                 if z.auswahl == WeltenZustand.uebersicht { z.waehlen(WeltenZustand.kanal, w, echt: false) }
                 z.reiter = .tickets
@@ -864,8 +985,8 @@ final class MacSteuerkanal {
                     z.handlungSchliessen()
                 } else {
                     guard let h = WeltenZustand.TicketHandlung(rawValue: wert) else {
-                        // Abnehmen fehlt mit Absicht: der Mensch nimmt nicht ab (Plan Satz 27).
-                        return MacSteuerantwort.fehler("\(befehl) ticket-handlung rueckgabe|verwerfen|annehmen|umadressieren|grenzen|pruefer <ticket>|zu (abnehmen darf der Mensch nicht)")
+                        // Das Abnahmeformular öffnet auch der Steuerkanal; ausführen darf es nur ein echter Klick (der Kern lehnt `echt: false` ab).
+                        return MacSteuerantwort.fehler("\(befehl) ticket-handlung rueckgabe|verwerfen|annehmen|umadressieren|grenzen|pruefer|abnehmen <ticket>|zu (Abnahme nimmt der Kern nur von einem belegten Menschen an, nicht über den Steuerkanal)")
                     }
                     guard let t = w.ticket(arg) else { return MacSteuerantwort.fehler("kein Ticket \(arg)") }
                     z.reiter = .tickets
@@ -885,7 +1006,8 @@ final class MacSteuerkanal {
                 case "punkt": z.ticketHandlung?.fertigPunkte.append(arg)
                 case "frist": z.ticketHandlung?.frist = arg
                 case "runden": z.ticketHandlung?.runden = arg
-                default: return MacSteuerantwort.fehler("\(befehl) ticket-handlung-feld grund|bemerkung|duplikat|an|pruefer|art|prioritaet|punkt|frist|runden <wert>")
+                case "dod": z.ticketHandlung?.dodGeprueft = ["ja", "an", "true", "1"].contains(arg)
+                default: return MacSteuerantwort.fehler("\(befehl) ticket-handlung-feld grund|bemerkung|duplikat|an|pruefer|art|prioritaet|punkt|frist|runden|dod <wert>")
                 }
             case "ticket-handlung-tun":
                 guard let e = z.ticketHandlung else {
@@ -900,6 +1022,8 @@ final class MacSteuerkanal {
                 case .umadressieren: await z.umadressieren(w, echt: false)
                 case .grenzen: await z.grenzenSetzen(w, echt: false)
                 case .pruefer: await z.prueferSetzen(w, echt: false)
+                // Der Kern lehnt die Abnahme ohne echten Klick ab („Abnehmen darf nur ein belegter Mensch.“).
+                case .abnehmen: await z.abnehmen(w, echt: false)
                 }
             case "backlog":
                 // welten backlog ordnen <id,id,…> | schieben <ticket> <+n|-n>
@@ -1273,8 +1397,10 @@ final class MacSteuerkanal {
         let z = fenster.chat
         if knopf == "freigabe-ja" || knopf == "freigabe-nein" {
             guard let f = fenster.chatOffeneFrage else { return MacSteuerantwort.fehler("keine offene Freigabefrage") }
-            z.freigabe(f.anfrageId, erlauben: knopf == "freigabe-ja")
-            return MacSteuerantwort.ok(["knopf": knopf, "anfrageId": f.anfrageId, "gelungen": true])
+            // Der Steuerkanal ist nie ein Mensch (13.10.2026): Erlauben lehnt der
+            // Kern ab, die Frage bleibt offen; Ablehnen geht.
+            z.freigabe(f.anfrageId, erlauben: knopf == "freigabe-ja", echt: false)
+            return MacSteuerantwort.ok(["knopf": knopf, "anfrageId": f.anfrageId, "gelungen": knopf == "freigabe-nein"])
         }
         if knopf.hasPrefix("werkzeug:") || knopf.hasPrefix("denken:") {
             let id = String(knopf.drop(while: { $0 != ":" }).dropFirst())
@@ -1591,6 +1717,57 @@ final class MacSteuerkanal {
         return e
     }
 
+    /// DIE RUECKFRAGE DER WELTEN AM SICHTBAREN FENSTER NIMMT DER STEUERKANAL UEBER IHREN KNOPF
+    /// WEG, denselben Weg wie ein Klick (Auftrag mac-alert-absturz, 10.10.2026). Setzte er nur
+    /// `rueckfrage = nil`, schloss SwiftUI das NSAlert-Sheet aus dem Layout-Durchlauf
+    /// (`AppKitDialogBridge.updateExistingAlert`), und die Schliessanimation lief eine
+    /// verschachtelte Runloop im laufenden Update-Zyklus: SIGSEGV in `UC::DriverCore`
+    /// (gemessen: 2 von 2 Laeufen nach 8 und 11 Wegnahmen; mit 1 s Wartezeit noch 1 in 107).
+    /// Kopflos stellt das Blatt kein Sheet (`WeltenZustand.kopflos`), dort bleibt es Zustand.
+    /// Wartet bis 2 s auf das Sheet und danach, bis die Handlung des Knopfs durch ist.
+    /// Nur das native Sheet des vordersten Eintrags, nie ein anderes Fenster/Sheet.
+    /// false: kein passender Knopf da oder die Antwort laeuft ueber ihre Frist.
+    private func rueckfrageKnopf(_ z: WeltenZustand, abbrechen: Bool, titel: String? = nil) async -> Bool {
+        guard !optionen.kopflos, let id = z.rueckfrageId else { return false }
+        let handlung = z.rueckfrage?.handlung ?? "neu"
+        let gesucht = titel ?? (abbrechen ? "Abbrechen" : z.weltNeuFrage.map {
+            "\(WeltenWorte.aufMaschine($0.vorgabe, satzanfang: true)) anlegen"
+        })
+        for _ in 0..<40 {
+            guard z.rueckfrageId == id else { return false }
+            if let w = z.rueckfrageFenster(), let sheet = w.attachedSheet,
+               sheet === z.rueckfrageSheet?.window, z.rueckfrageSheetId == id {
+                let knoepfe = Self.knoepfe(sheet.contentView)
+                guard knoepfe.contains(where: { $0.title == "Abbrechen" }),
+                      let knopf = knoepfe.first(where: { knopf in
+                          gesucht.map { $0 == knopf.title } ?? (knopf.title != "Abbrechen")
+                      }) else { return false }
+                knopf.performClick(nil)
+                return await rueckfrageKnopfAbwarten(z, id: id, handlung: handlung)
+            }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        return false
+    }
+
+    private func rueckfrageKnopfAbwarten(_ z: WeltenZustand, id: UUID, handlung: String) async -> Bool {
+        let bis = Date().addingTimeInterval(25)
+        // Der Nachfolger darf schon stehen, auch bei derselben Handlung. Auf die
+        // Identitaet des alten Kopfes warten, nicht auf eine insgesamt leere Schlange.
+        while (z.rueckfrageId == id || z.rueckfrageSheetId == id || z.laufend.contains(handlung)), Date() < bis {
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        return z.rueckfrageId != id && z.rueckfrageSheetId != id && !z.laufend.contains(handlung)
+    }
+
+    private static func knoepfe(_ v: NSView?) -> [NSButton] {
+        guard let v else { return [] }
+        var raus: [NSButton] = []
+        if let b = v as? NSButton { raus.append(b) }
+        for u in v.subviews { raus += knoepfe(u) }
+        return raus
+    }
+
     /// Was von den anklickbaren Pfaden zu sehen ist (Auftrag 3.6): die
     /// Fundstellen im Gespraech und das zuletzt Geoeffnete.
     private func pfadAuskunft() -> [String: Any] {
@@ -1715,6 +1892,8 @@ final class MacSteuerkanal {
                 // Und wie oft ein Fenster die App nach vorn holen WOLLTE -- die
                 // Zahl, an der die Zusage haengt (Laufoptionen.swift, `Fensterweg`).
                 "aktivierungen": Fensterweg.aktivierungen,
+                // Wie oft ein zweiter Start diese App nach vorn bat (Einzelinstanz.swift).
+                "vorgeholt": Einzelinstanz.vorgeholt,
                 "dunkel": fenster.fenster.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua,
                 // Fenster- und Ansichtszustand (Auftrag 2.8): Vollbild, die Breiten
                 // der Spalten, der Name des gemerkten Rahmens, die Symbolleiste
@@ -1819,5 +1998,140 @@ final class MacSteuerkanal {
                          "schrift": kern.modell.schriftgroesse,
                          "gezoomt": fenster.terminal.lageArt == "pane"],
         ]
+    }
+}
+
+/// DER HOVER-PEEK EINER EINGEKLAPPTEN SPALTE IN DER PRUEFUNG (Auftrag app-absturz-peek, 11.10.2026).
+/// AppKit legt an den Rand einer eingeklappten Seitenleiste oder eines Inspektors eine
+/// `_NSSplitViewCollapsedInteractionsView`; bleibt der Zeiger dort stehen, holt ein Zeitgeber die Spalte als
+/// Ueberlagerung herein (Stapel der Abstuerze vom 11.10.: `_setRolloverTimerAtHoverLocation:` ->
+/// `_beginProactivePeekAtLocation:` -> `NSSplitViewController _collapse:…forceOverlay:`). Eine Pruefung bewegt
+/// den Zeiger des Menschen nie; die Probe gibt der Randansicht deshalb dasselbe `mouseMoved:`, das ihr sonst
+/// der Fensterserver schickt, und den Rest bis zum Peek erledigt AppKit selbst.
+@MainActor
+enum Spaltenprobe {
+    private static func wurzel(_ fenster: NSWindow) -> NSView? { fenster.contentView?.superview ?? fenster.contentView }
+
+    private static func alle(_ fenster: NSWindow, _ passt: (NSView) -> Bool) -> [NSView] {
+        var raus: [NSView] = []
+        func gehe(_ v: NSView) {
+            if passt(v) { raus.append(v) }
+            v.subviews.forEach(gehe)
+        }
+        if let w = wurzel(fenster) { gehe(w) }
+        return raus
+    }
+
+    static func splitController(_ fenster: NSWindow) -> [NSSplitViewController] {
+        alle(fenster) { (($0 as? NSSplitView)?.delegate as? NSSplitViewController) != nil }
+            .compactMap { ($0 as? NSSplitView)?.delegate as? NSSplitViewController }
+    }
+
+    static func item(_ fenster: NSWindow, inspektor: Bool) -> (NSSplitViewController, NSSplitViewItem)? {
+        for c in splitController(fenster) {
+            if let i = c.splitViewItems.first(where: { $0.behavior == (inspektor ? .inspector : .sidebar) }) { return (c, i) }
+        }
+        return nil
+    }
+
+    /// Zugewiesen, nicht ueber `toggleSidebar`/`toggleInspector`: deren Animator liest den alten Wert
+    /// nach (Fenster.swift, `Aufteilung.toggleSidebar`), und die Probe braucht den Stand sofort.
+    static func klappen(_ fenster: NSWindow, inspektor: Bool, zu: Bool) -> Bool {
+        guard let (_, i) = item(fenster, inspektor: inspektor) else { return false }
+        if i.isCollapsed != zu { i.isCollapsed = zu }
+        return true
+    }
+
+    /// Den Teiler neben der Spalte so stellen, dass sie `breite` Punkte breit ist -- wie ein Zug mit der Maus;
+    /// die Grenzen der Spalte (auch die aus SwiftUI) setzt AppKit dabei selbst durch.
+    static func breiteSetzen(_ fenster: NSWindow, inspektor: Bool, breite: CGFloat) -> Bool {
+        guard let (c, i) = item(fenster, inspektor: inspektor), !i.isCollapsed,
+              let n = c.splitViewItems.firstIndex(where: { $0 === i }) else { return false }
+        let split = c.splitView
+        if inspektor {
+            split.setPosition(split.bounds.width - breite - split.dividerThickness, ofDividerAt: n - 1)
+        } else {
+            split.setPosition(breite, ofDividerAt: n)
+        }
+        split.layoutSubtreeIfNeeded()
+        return true
+    }
+
+    private static func randAnsichten(_ fenster: NSWindow) -> [NSView] {
+        guard let k = NSClassFromString("_NSSplitViewCollapsedInteractionsView") else { return [] }
+        return alle(fenster) { $0.isKind(of: k) }
+    }
+
+    /// Links (Seitenleiste) oder rechts (Inspektor) im Fenster.
+    private static func links(_ v: NSView, _ fenster: NSWindow) -> Bool {
+        v.convert(v.bounds, to: nil).midX < fenster.frame.width / 2
+    }
+
+    static func peek(_ fenster: NSWindow, inspektor: Bool, direkt: Bool, zeitgeber: Bool = false) -> String {
+        let rand = randAnsichten(fenster).filter { !$0.isHiddenOrHasHiddenAncestor && links($0, fenster) != inspektor }
+        guard let v = rand.first else { return "keine Randansicht" }
+        let r = v.convert(v.bounds, to: nil)
+        guard let e = NSEvent.mouseEvent(with: .mouseMoved, location: NSPoint(x: r.midX, y: r.midY), modifierFlags: [],
+                                         timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: fenster.windowNumber,
+                                         context: nil, eventNumber: 0, clickCount: 0, pressure: 0) else { return "kein Ereignis" }
+        v.mouseMoved(with: e)
+        if zeitgeber {
+            // Der Zeitgeber, den `mouseMoved:` sonst stellt (unterster Frame im Absturzstapel). Vorher dieselbe
+            // Frage wie AppKit, ob die Spalte gepeekt werden darf (`_canDo…ProactivePeek`, fragt den Delegaten);
+            // der Zeitgeber selbst fragt nicht mehr.
+            if let split = v.superview as? NSSplitView ?? alle(fenster, { $0 is NSSplitView }).first as? NSSplitView,
+               bool(split, inspektor ? "_canDoInspectorProactivePeek" : "_canDoSidebarProactivePeek") == false {
+                return "abgelehnt"
+            }
+            let sel = NSSelectorFromString("_setRolloverTimerAtHoverLocation:")
+            guard let m = class_getInstanceMethod(type(of: v), sel) else { return "kein _setRolloverTimerAtHoverLocation:" }
+            typealias F = @convention(c) (AnyObject, Selector, NSPoint) -> Void
+            unsafeBitCast(method_getImplementation(m), to: F.self)(v, sel, NSPoint(x: r.midX, y: r.midY))
+            return "zeitgeber"
+        }
+        if direkt {
+            // Ohne Zeiger am Rand laeuft der Zeitgeber nicht an (er prueft die echte Zeigerlage); dann
+            // derselbe Aufruf, den sein Block macht.
+            let sel = NSSelectorFromString("_beginProactivePeekAtLocation:")
+            guard let m = class_getInstanceMethod(type(of: v), sel) else { return "kein _beginProactivePeekAtLocation:" }
+            typealias F = @convention(c) (AnyObject, Selector, NSPoint) -> Void
+            unsafeBitCast(method_getImplementation(m), to: F.self)(v, sel, NSPoint(x: r.midX, y: r.midY))
+            return "direkt"
+        }
+        return "mouseMoved"
+    }
+
+    /// Ein BOOL-Getter ohne Argument, ueber die Implementierung gerufen (`perform` taugt fuer BOOL nicht).
+    private static func bool(_ o: NSObject, _ name: String) -> Bool? {
+        let sel = NSSelectorFromString(name)
+        guard let m = class_getInstanceMethod(type(of: o), sel) else { return nil }
+        typealias F = @convention(c) (AnyObject, Selector) -> Bool
+        return unsafeBitCast(method_getImplementation(m), to: F.self)(o, sel)
+    }
+
+    static func auskunft(_ fenster: NSWindow) -> [String: Any] {
+        var a: [String: Any] = ["peekt": false]
+        for c in splitController(fenster) {
+            for i in c.splitViewItems where i.behavior != .default {
+                a[i.behavior == .sidebar ? "seite" : "inspektor"] = ["zu": i.isCollapsed, "breite": Int(i.viewController.view.frame.width.rounded())]
+            }
+            if bool(c.splitView, "_isPeeking") == true { a["peekt"] = true }
+            // Ob AppKit jetzt peeken wuerde -- dieselbe Frage, die `mouseMoved:` am Rand stellt.
+            a["kannSeite"] = bool(c.splitView, "_canDoSidebarProactivePeek") ?? "?"
+            a["kannInspektor"] = bool(c.splitView, "_canDoInspectorProactivePeek") ?? "?"
+        }
+        a["rand"] = randAnsichten(fenster).map { v -> [String: Any] in
+            let r = v.convert(v.bounds, to: nil)
+            return ["x": Int(r.minX), "b": Int(r.width), "h": Int(r.height), "links": links(v, fenster), "sichtbar": !v.isHiddenOrHasHiddenAncestor]
+        }
+        a["fenster"] = [Int(fenster.frame.width), Int(fenster.frame.height)]
+        a["minSize"] = [Int(fenster.minSize.width), Int(fenster.contentMinSize.width), Int(fenster.contentView?.fittingSize.width ?? -1)]
+        a["items"] = splitController(fenster).flatMap { c in c.splitViewItems.map { i -> [String: Any] in
+            let f = i.viewController.view.frame
+            return ["art": i.behavior == .sidebar ? "seite" : i.behavior == .inspector ? "inspektor" : "inhalt", "x": Int(f.minX), "b": Int(f.width),
+                    "zu": i.isCollapsed, "min": Int(i.minimumThickness), "verhalten": i.collapseBehavior.rawValue,
+                    "fitting": Int(i.viewController.view.fittingSize.width)]
+        } }
+        return a
     }
 }

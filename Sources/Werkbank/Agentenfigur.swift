@@ -3,7 +3,8 @@
 // Uebertragen aus `docs/agentenfiguren.html`, dem fuenften Entwurf, den
 // der Nutzer am 10.09. als Richtung abgenommen hat (docs/AGENTS-PLAN.md,
 // Abschnitt 7, „Das Aussehen der Agenten"). Der Zeichner dort ist
-// Canvas-JavaScript; hier ist er SwiftUI `Canvas`, bewegt von `TimelineView`.
+// Canvas-JavaScript; hier ist er SwiftUI `Canvas`, bewegt von der gemeinsamen
+// `FigurUhr` (bis 09.10.2026 je Figur eine eigene `TimelineView`).
 // Dieselben Ableitungen, dieselben Masse, dieselbe Reihenfolge der
 // Zufallszahlen -- ein Worker-Name ergibt hier genau die Figur, die er im
 // Blatt ergibt. `AgentenfigurTests` prueft das an Werten, die das Blatt selbst
@@ -802,21 +803,29 @@ struct FigurRingAnsicht: View {
                 if systemRuhig || standbild {
                     Circle().strokeBorder(farbe, lineWidth: breite)
                 } else {
-                    TimelineView(.animation(minimumInterval: 1.0 / 30)) { tl in
-                        let winkel = tl.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: Self.umlauf) / Self.umlauf * 360
-                        ZStack {
-                            Circle().strokeBorder(farbe.opacity(0.28), lineWidth: breite)
-                            Circle().inset(by: breite / 2).trim(from: 0, to: 0.3)
-                                .stroke(farbe, style: StrokeStyle(lineWidth: breite, lineCap: .round))
-                                .rotationEffect(.degrees(winkel))
-                        }
-                    }
+                    FigurRingBogen(farbe: farbe, breite: breite)
                 }
             }
         }
         .padding(-abstand)
         .allowsHitTesting(false)
         .accessibilityHidden(true)
+    }
+}
+
+/// Der kreisende Bogen. Nur dieser kleine Teil liest die Uhr und wird je Takt neu ausgewertet.
+private struct FigurRingBogen: View {
+    let farbe: Color
+    let breite: CGFloat
+
+    var body: some View {
+        let winkel = FigurUhr.geteilt.t.truncatingRemainder(dividingBy: FigurRingAnsicht.umlauf) / FigurRingAnsicht.umlauf * 360
+        ZStack {
+            Circle().strokeBorder(farbe.opacity(0.28), lineWidth: breite)
+            Circle().inset(by: breite / 2).trim(from: 0, to: 0.3)
+                .stroke(farbe, style: StrokeStyle(lineWidth: breite, lineCap: .round))
+                .rotationEffect(.degrees(winkel))
+        }
     }
 }
 
@@ -857,11 +866,7 @@ struct Agentenfigur: View {
             if ruhig {
                 Canvas(rendersAsynchronously: false) { ctx, size in zeichner(reduziert: true).zeichnen(&ctx, groesse: size.width, t: 0) }
             } else {
-                TimelineView(.animation(minimumInterval: 1.0 / 30)) { tl in
-                    Canvas { ctx, size in
-                        zeichner(reduziert: false).zeichnen(&ctx, groesse: size.width, t: tl.date.timeIntervalSinceReferenceDate + versatz)
-                    }
-                }
+                FigurBewegt(zeichner: zeichner(reduziert: false), versatz: versatz)
             }
         }
         .frame(width: groesse, height: groesse)
@@ -878,5 +883,17 @@ struct Agentenfigur: View {
                              art: FigurArt.fuer(rolle: rolle, team: t, arten: arten), team: t,
                              zustand: zustand, reduziert: reduziert, palette: FigurPalette(dunkel: schema == .dark),
                              samen: samen, u: Double(groesse) / 100)
+    }
+}
+
+/// Die bewegte Figur. Nur dieser kleine Teil liest die Uhr: je Takt wird er neu ausgewertet und die
+/// Leinwand neu gezeichnet, der Zeichner selbst entsteht nur, wenn sich die Figur aendert.
+private struct FigurBewegt: View {
+    let zeichner: FigurZeichner
+    let versatz: Double
+
+    var body: some View {
+        let t = FigurUhr.geteilt.t + versatz
+        Canvas { ctx, size in zeichner.zeichnen(&ctx, groesse: size.width, t: t) }
     }
 }

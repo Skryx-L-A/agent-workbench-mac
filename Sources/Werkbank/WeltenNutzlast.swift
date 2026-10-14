@@ -390,7 +390,7 @@ struct WeltAntrag: Equatable, Identifiable, Sendable {
 
 /// Ein Entwurf fuer einen neuen Agenten, in den Feldern der Datenbibliothek (`validate_agent_draft`).
 struct AgentEntwurf: Equatable, Sendable {
-    var id = "", stufe = "mitglied", team = "", spezialgebiet = "", modell = "sonnet5", denkstufe = "high"
+    var id = "", stufe = "mitglied", team = "", spezialgebiet = "", modell = "sonnet", denkstufe = "high"
     var fallback = "", fallbackDenkstufe = "", maschine = "peer"
     // Jede Stufe schreibt (15.09.2026); Web-Werkzeuge kommen nur auf Wahl dazu.
     var werkzeuge: [String] = ["Read", "Grep", "Glob", "Bash", "Write", "Edit"]
@@ -398,7 +398,7 @@ struct AgentEntwurf: Equatable, Sendable {
     var figurArt = "roboter", figurFarbe = "entwicklung"
     var anweisungen = "", vorlage = ""
     /// Auftrag agentsform: Modell und Fallback sind Kennungen aus der Modellliste der Welt und gehen woertlich
-    /// hinaus (`sonnet5:high`, `haiku`); der Traeger sucht genau diesen Namen. Sonst Basis plus Denkstufe als Suffix.
+    /// hinaus (`sonnet:high`, `haiku`); der Traeger sucht genau diesen Namen. Sonst Basis plus Denkstufe als Suffix.
     var modellGenau = false
 
     init() {}
@@ -432,14 +432,14 @@ struct AgentEntwurf: Equatable, Sendable {
     var bashMuster: [String] { bash.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty } }
     var skillListe: [String] { skills.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty } }
 
-    /// `sonnet5:high` -> (`sonnet5`, `high`); eine ausdrueckliche Stufe gilt vor dem Suffix.
+    /// `sonnet:high` -> (`sonnet`, `high`); eine ausdrueckliche Stufe gilt vor dem Suffix.
     static func teilen(_ modell: String, _ stufe: String) -> (String, String) {
         let teile = modell.split(separator: ":", maxSplits: 1).map(String.init)
         let basis = teile.first ?? ""
         return (basis, stufe.isEmpty ? (teile.count > 1 ? teile[1] : "") : stufe)
     }
 
-    /// Modell mit Denkstufe als Suffix, wie die Registry spawnt (`sonnet5:high`).
+    /// Modell mit Denkstufe als Suffix, wie die Registry spawnt (`sonnet:high`).
     static func mitStufe(_ modell: String, _ stufe: String) -> String {
         let basis = modell.split(separator: ":").first.map(String.init) ?? modell
         return basis.isEmpty ? "" : (stufe.isEmpty ? basis : "\(basis):\(stufe)")
@@ -782,6 +782,30 @@ struct WeltenNutzlast: Equatable, Sendable {
 // MARK: Worte und Punkte
 
 enum WeltenWorte {
+    /// Auftrag pausetext (10.10.2026): Die Pause friert einen laufenden Zug nicht ein (shell/agents_claude_lauf.py,
+    /// `ClaudeZugLauncher`: das Zugende ist der Checkpoint). Er arbeitet zu Ende, danach startet keiner mehr; sofort
+    /// haelt nur „Stoppen". Wie viele laut `status --nur-zug` gerade einen Zug haben -- fuer die Welt jeder Agent,
+    /// fuer einen Agenten nur er.
+    static func laufendeZuege(_ w: Welt, agent: WeltAgent?) -> Int {
+        (agent.map { [$0] } ?? w.agenten).filter { $0.zug?.laeuft == true }.count
+    }
+
+    static let pauseZugSatz = "Ein laufender Zug arbeitet noch zu Ende und kann dabei Ergebnisse schreiben. Danach startet kein neuer Zug. Sofort anhalten lässt sich nur mit „Stoppen“."
+
+    /// Hinter „pausiert“, solange ein Zug noch laeuft; nil, wenn nichts pausiert ist oder kein Zug laeuft.
+    static func pauseZusatz(_ w: Welt, agent: WeltAgent?) -> String? {
+        let n = laufendeZuege(w, agent: agent)
+        guard (agent?.stand ?? w.stand) == "pausiert", n > 0 else { return nil }
+        return n == 1 ? "laufender Zug endet noch" : "\(n) laufende Züge enden noch"
+    }
+
+    /// Der Hilfetext am Pausenschalter; laeuft ein Zug, sagt er, dass die Pause ihn zu Ende arbeiten laesst.
+    static func pauseHilfe(_ w: Welt, agent: WeltAgent?) -> String {
+        let basis = agent.map { "Pause hält \($0.name) am nächsten Checkpoint an." }
+            ?? "Pause hält jeden Agenten der Welt am nächsten Checkpoint an; nichts Neues startet."
+        return laufendeZuege(w, agent: agent) > 0 ? "\(basis) \(pauseZugSatz)" : basis
+    }
+
     /// Der Untertitel unter dem Namen der Welt: die globale Welt oder ihr Projekt, dazu ihre Maschine („~/AI/myproject · peer").
     static func herkunft(_ w: Welt) -> String {
         let ort = w.art == "global" ? "Globale Welt" : (w.projekt.map { w.fern ? kurzpfad($0) : kurzerPfad($0) } ?? "")
@@ -872,6 +896,16 @@ enum WeltenWorte {
 
     /// Das Wort neben dem Punkt: das Lebenszeichen, sonst das Zustandswort.
     static func agentWort(_ a: WeltAgent, jetzt: Date = Date()) -> String { leben(a, jetzt: jetzt) ?? zustand(a.zustand) }
+
+    /// Auftrag pausezaehler (10.10.2026): Seitenleiste und Karte sagen bei einem pausierten Agenten mit laufendem Zug
+    /// beides -- „pausiert · laufender Zug endet noch“ --, nicht nur „arbeitet seit …“ wie der Kopf; sonst nil.
+    /// Dieselbe Regel wie `zeilenWort` in welten-view.ts.
+    static func pauseZeile(_ a: WeltAgent) -> String? {
+        a.zustand == "pausiert" && a.zug?.laeuft == true ? "\(zustand("pausiert")) · laufender Zug endet noch" : nil
+    }
+
+    /// Das Wort in der Zeile der Seitenleiste und auf der Karte: `pauseZeile`, sonst `agentWort`.
+    static func zeilenWort(_ a: WeltAgent, jetzt: Date = Date()) -> String { pauseZeile(a) ?? agentWort(a, jetzt: jetzt) }
 
     /// Die Gruende des Traegers als Wort (`zug_stand` in shell/agents_traeger.py); ein unbekannter bleibt roh.
     static func grund(_ g: String?) -> String {

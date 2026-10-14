@@ -299,8 +299,10 @@ final class ChatZustand {
         return true
     }
 
-    func freigabe(_ anfrageId: String, erlauben: Bool) {
-        Task { @MainActor in _ = await kern.chatFreigabe(anfrageId, erlauben: erlauben) }
+    /// `echt`: der Aufrufer sagt, ob ein Mensch gedrueckt hat (Knopf, Kuerzel: ja;
+    /// Steuerkanal: nie). Erlauben ohne ihn lehnt der Kern ab (13.10.2026).
+    func freigabe(_ anfrageId: String, erlauben: Bool, echt: Bool) {
+        Task { @MainActor in _ = await kern.chatFreigabe(anfrageId, erlauben: erlauben, echt: echt) }
     }
 
     func neustart() {

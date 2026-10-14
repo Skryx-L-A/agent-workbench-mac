@@ -158,7 +158,7 @@ private struct AntragKarte: View {
     private func entscheiden(_ annehmen: Bool) {
         let o = OffeneFreigabe(art: .antrag, wer: antrag.parent, wo: antrag.projekt, worum: antrag.task,
                                sessionId: "", pane: "", schluessel: "", pfad: antrag.path)
-        handlungen.entscheiden(o, annehmen: annehmen, grund: (zustand.blattGruende[antrag.id] ?? "").trimmingCharacters(in: .whitespacesAndNewlines))
+        handlungen.entscheiden(o, annehmen: annehmen, grund: (zustand.blattGruende[antrag.id] ?? "").trimmingCharacters(in: .whitespacesAndNewlines), echt: true)
         zustand.blattGruende[antrag.id] = nil
     }
 }
@@ -217,7 +217,7 @@ private struct BlockKarte: View {
     private func entscheiden(_ annehmen: Bool) {
         let o = OffeneFreigabe(art: .rueckfrage, wer: block.wer, wo: block.sessionName, worum: block.command,
                                sessionId: block.sessionId, pane: block.pane, schluessel: block.schluessel, pfad: block.path)
-        handlungen.entscheiden(o, annehmen: annehmen, grund: (zustand.blattGruende[block.id] ?? "").trimmingCharacters(in: .whitespacesAndNewlines))
+        handlungen.entscheiden(o, annehmen: annehmen, grund: (zustand.blattGruende[block.id] ?? "").trimmingCharacters(in: .whitespacesAndNewlines), echt: true)
         zustand.blattGruende[block.id] = nil
     }
 }

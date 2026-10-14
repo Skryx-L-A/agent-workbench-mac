@@ -56,6 +56,8 @@ final class SitzungsZustand {
     var suche = ""
     var zustandFilter = "alle"
     var gewaehlt = ""
+    /// Zielmodell fuer eine bereits laufende lokale Sitzung.
+    var wechselModell = ""
     /// Die Fusszeile: die letzte Meldung des Kerns, wortwoertlich, mit Art ("", "gut", "fehler").
     private(set) var status = ""
     private(set) var statusArt = ""
@@ -95,6 +97,7 @@ final class SitzungsZustand {
         if !gewaehlt.isEmpty, !neu.sitzungen.contains(where: { $0.id == gewaehlt }) { gewaehlt = "" }
         if !maschine.isEmpty, maschine != neu.machine, !neu.remoteMachines.contains(maschine) { maschine = "" }
         zeichnungen += 1
+        wechselAbgleichen()
         if spracheAlt != nil, spracheAlt != neu.sprache {
             Task { @MainActor in
                 let t = await kern.invoke("awb:sitz-texte")
@@ -126,6 +129,19 @@ final class SitzungsZustand {
         if wahl.model.isEmpty { wahl.model = d.einstellung.model }
         if wahl.effort.isEmpty { wahl.effort = d.einstellung.effort }
         if wahl.kontext == 0 { wahl.kontext = d.einstellung.kontext }
+        wechselAbgleichen()
+    }
+
+    /// Registry/settings changed while the chooser is already open.
+    func wahlAngekommen(_ zeile: Data) {
+        let d = WahlDaten.lesen(zeile)
+        wahlDaten = d
+        wahlFehler = ""
+        if wahl.harness.isEmpty { wahl.harness = d.einstellung.harness }
+        if wahl.model.isEmpty { wahl.model = d.einstellung.model }
+        if wahl.effort.isEmpty { wahl.effort = d.einstellung.effort }
+        if wahl.kontext == 0 { wahl.kontext = d.einstellung.kontext }
+        wechselAbgleichen()
     }
 
     func kontextHolen(_ modellId: String) {
@@ -190,6 +206,13 @@ final class SitzungsZustand {
     var grundText: String { gewaehlteZeile?.grund ?? texte.t("satz.waehleSitzung") }
     var fortsetzenGesperrt: Bool { beschaeftigt || !(gewaehlteZeile?.fortsetzbar ?? false) }
     var beendenGesperrt: Bool { beschaeftigt || !(gewaehlteZeile?.laeuftGerade ?? false) }
+    var wechselModelle: [WahlModell] {
+        guard let z = gewaehlteZeile, z.laeuftGerade, z.machine == eigeneMaschine else { return [] }
+        return wahlDaten?.modelle.filter { $0.harness == z.harness && $0.startbar && $0.wechselbar } ?? []
+    }
+    var wechselGesperrt: Bool {
+        beschaeftigt || wechselModell.isEmpty || wechselModell == gewaehlteZeile?.model || wechselModelle.isEmpty
+    }
     var startGesperrt: Bool { beschaeftigt || (rolle == .orchestrator && wahl.model.isEmpty && !wahlIstVorgabe) }
 
     /// Der Zustand als Wort (zustandMarke in sitzung.ts) -- aus der Texttabelle des Kerns.
@@ -250,6 +273,20 @@ final class SitzungsZustand {
         guard wahl.model != id else { return }
         wahl.model = id
         wahl.kontext = 0
+    }
+
+    func sitzungWaehlen(_ id: String) {
+        gewaehlt = id
+        wechselAbgleichen()
+    }
+
+    private func wechselAbgleichen() {
+        let modelle = wechselModelle
+        guard !modelle.isEmpty else { wechselModell = ""; return }
+        if !modelle.contains(where: { $0.id == wechselModell }) {
+            let bisher = gewaehlteZeile?.model ?? ""
+            wechselModell = modelle.contains(where: { $0.id == bisher }) ? bisher : (modelle.first?.id ?? "")
+        }
     }
 
     // MARK: Die Handlungen -- dieselben Kanaele wie die Electron-Fassung
@@ -314,6 +351,16 @@ final class SitzungsZustand {
         handlung = Task { @MainActor in
             defer { beschaeftigt = false }
             meldeAntwort(antwort(await kern.invoke("awb:sitz-fortsetzen", [z.id, echt && !kopflos])))
+        }
+    }
+
+    func modellWechseln(echt: Bool) {
+        guard !wechselGesperrt, let z = gewaehlteZeile else { return }
+        beschaeftigt = true
+        melde("Modellwechsel wird vorbereitet …")
+        handlung = Task { @MainActor in
+            defer { beschaeftigt = false }
+            meldeAntwort(antwort(await kern.invoke("awb:sitz-modell-wechsel", [z.id, wechselModell, "", echt && !kopflos])))
         }
     }
 
@@ -454,6 +501,9 @@ final class SitzungsZustand {
         case "neu-start": return ["da": true, "gesperrt": startGesperrt, "text": rolle == .chat ? texte.t("knopf.neuChat") : texte.t("knopf.start")]
         case "fort-start": return ["da": true, "gesperrt": fortsetzenGesperrt, "text": texte.t("knopf.fortsetzen")]
         case "beenden-start": return ["da": true, "gesperrt": beendenGesperrt, "text": texte.t("knopf.beenden")]
+        case "modell-wechsel": return ["da": !wechselModelle.isEmpty, "wert": wechselModell,
+                                        "optionen": wechselModelle.map { ["wert": $0.id, "label": $0.label] }]
+        case "modell-wechsel-start": return ["da": !wechselModelle.isEmpty, "gesperrt": wechselGesperrt, "text": "Modell wechseln"]
         case "fort-grund": return ["da": true, "text": grundText]
         case "such-feld": return ["da": true, "wert": suche]
         case "zustand-chips":
@@ -543,6 +593,7 @@ final class SitzungsFenster: NSObject, NSWindowDelegate {
         zustand.frage = { [weak self] titel, text, knopf in await self?.rueckfrage(titel, text, knopf: knopf) ?? false }
         if !kopflos { zustand.ordnerWaehlen = { [weak self] in await self?.ordnerDialog() ?? "" } }
         kern.aufSitzungNeu = { [weak self] zeile in self?.zustand.datenAngekommen(zeile) }
+        kern.aufWahlNeu = { [weak self] zeile in self?.zustand.wahlAngekommen(zeile) }
         kern.aufStartfehler = { [weak self] zeile in self?.zustand.startfehlerAngekommen(zeile) }
     }
 
@@ -1093,7 +1144,7 @@ struct SitzungsBlattAnsicht: View {
         if beleg {
             inhalt
         } else {
-            Button { zustand.gewaehlt = z.id } label: { inhalt }
+            Button { zustand.sitzungWaehlen(z.id) } label: { inhalt }
                 .buttonStyle(.plain)
                 .help(z.grund)
                 .accessibilityLabel("\(z.name), \(zustand.zustandWort(z.state, startet: z.startet, startFehler: z.startFehler)), \(womit)")
@@ -1145,6 +1196,27 @@ private struct SitzungsFuss: View {
                         .buttonStyle(.borderedProminent)
                         .disabled(zustand.fortsetzenGesperrt)
                         .accessibilityIdentifier("fort-start")
+                }
+            }
+            if !zustand.wechselModelle.isEmpty {
+                HStack(spacing: 10) {
+                    Text("Modell dieser laufenden Sitzung").font(.callout).foregroundStyle(.secondary)
+                    if beleg {
+                        Kasten(zustand.wechselModelle.first { $0.id == zustand.wechselModell }.map { "\($0.label) · \($0.id)" } ?? "–", pfeil: true)
+                        Text("Modell wechseln").font(.callout).padding(.horizontal, 10).padding(.vertical, 3)
+                            .background(Capsule().fill(zustand.wechselGesperrt ? AnyShapeStyle(.quaternary) : AnyShapeStyle(.tint)))
+                    } else {
+                        Picker(selection: Binding(get: { zustand.wechselModell }, set: { zustand.wechselModell = $0 })) {
+                            ForEach(zustand.wechselModelle) { m in Text("\(m.label) · \(m.id)").tag(m.id) }
+                        } label: { EmptyView() }
+                        .pickerStyle(.menu)
+                        .accessibilityIdentifier("modell-wechsel")
+                        Button("Modell wechseln") { zustand.modellWechseln(echt: !zustand.kopflos) }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(zustand.wechselGesperrt)
+                            .accessibilityIdentifier("modell-wechsel-start")
+                    }
+                    Spacer(minLength: 0)
                 }
             }
             HStack(spacing: 6) {

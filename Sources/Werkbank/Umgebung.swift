@@ -2,11 +2,14 @@
 //
 // BEFUND VOM 13.09. der Nutzer startete die Werkbank.app per Doppelklick; keine
 // Sitzung liess sich fortsetzen oder neu starten. `mac-lauf/kern.log` enthielt
-// nur `env: node: No such file or directory`: der Mantel startet den Kern ueber
-// `node_modules/.bin/electron`, ein Skript mit `#!/usr/bin/env node`, und launchd
-// gibt einer GUI-Anwendung nur `PATH=/usr/bin:/bin:/usr/sbin:/sbin` (gemessen am
-// laufenden Mantel). Homebrew mit `node` und `tmux` liegt nicht darin. Aus einem
-// Terminal gestartet erbte die App den vollen PATH, deshalb fiel es vorher nicht auf.
+// nur `env: node: No such file or directory`: der Mantel startete den Kern
+// damals ueber `node_modules/.bin/electron`, ein Skript mit
+// `#!/usr/bin/env node`. launchd gibt einer GUI-Anwendung nur
+// `PATH=/usr/bin:/bin:/usr/sbin:/sbin` (gemessen am laufenden Mantel).
+// Homebrew mit `tmux` und den Werkbankwerkzeugen liegt nicht darin. Der Kern
+// startet Electron inzwischen unmittelbar aus seinem Paket; ein `node` im PATH
+// ist dafuer nicht mehr erforderlich. Aus einem Terminal gestartet erbte die
+// App den vollen PATH, deshalb fiel es vorher nicht auf.
 //
 // Derselbe Weg wie im Kern (`app/src/main/pfad.ts`, Befund vom 07.08.): die
 // Anmelde-Shell nach PATH und Sprachumgebung fragen, Fehlendes ANHAENGEN (nie
@@ -18,6 +21,24 @@ import Foundation
 enum Umgebung {
     static let marke = "__AWB_UMGEBUNG__"
     static let localeVariablen = ["LC_ALL", "LC_CTYPE", "LANG"]
+
+    /// DER ORDNER DER HARNESS-SYMLINKS GEHOERT NICHT IN DEN PATH DER WERKBANK (11.10.2026, Auftrag
+    /// app-path). `shell/wb-harness-run` stellt `~/.local/state/wb-harness-bin` vor den PATH eines
+    /// Harness-Starts; eine aus so einem Pane gestartete Werkbank erbte ihn, und der Harness-Updater
+    /// des Kerns fand auf peer die Symlinks statt der mise-Shims. Entfernt wird jeder Eintrag, dessen
+    /// realpath dem des Ordners entspricht (auch mit `~/` vorn oder `/` hinten); sonst bleibt der PATH
+    /// unveraendert. Dasselbe tut `app/src/main/pfad.ts` fuer den Kern.
+    static func harnessBinEntfernen(pfad: String, heim: String = NSHomeDirectory()) -> String {
+        func echt(_ p: String) -> String {
+            URL(fileURLWithPath: p).resolvingSymlinksInPath().standardizedFileURL.path
+        }
+        let ziel = echt((heim as NSString).appendingPathComponent(".local/state/wb-harness-bin"))
+        return pfad.split(separator: ":", omittingEmptySubsequences: false).map(String.init).filter { e in
+            if e.isEmpty { return true }
+            let voll = e == "~" ? heim : e.hasPrefix("~/") ? (heim as NSString).appendingPathComponent(String(e.dropFirst(2))) : e
+            return echt(voll) != ziel
+        }.joined(separator: ":")
+    }
 
     /// PATH-Eintraege aus `dazu`, die in `geerbt` fehlen, hinten angehaengt.
     static func pfadZusammenfuehren(geerbt: String, dazu: String) -> String {
@@ -66,7 +87,9 @@ enum Umgebung {
     static func herrichten(env: [String: String] = ProcessInfo.processInfo.environment) -> String {
         let werte = anmeldeShellWerte(env: env)
         let geerbt = env["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
-        let neu = pfadZusammenfuehren(geerbt: geerbt, dazu: werte["PATH"] ?? "")
+        let heim = (env["HOME"] ?? "").hasPrefix("/") ? env["HOME"]! : NSHomeDirectory()
+        let bereinigt = harnessBinEntfernen(pfad: geerbt, heim: heim)
+        let neu = pfadZusammenfuehren(geerbt: bereinigt, dazu: harnessBinEntfernen(pfad: werte["PATH"] ?? "", heim: heim))
         if neu != geerbt { setenv("PATH", neu, 1) }
         var locale = ""
         if !localeVariablen.contains(where: { !(env[$0] ?? "").isEmpty }) {

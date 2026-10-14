@@ -52,6 +52,15 @@ final class Kopf: NSObject, NSPopoverDelegate {
     private var wahlVersuche = 0
     private var wahlSeit = Date.distantPast
     private static let wahlFrist: TimeInterval = 2.0
+    /// Ob die Wahl der eben gewaehlten Sitzung noch durchgesetzt wird. Solange
+    /// das gilt, setzt `lageAngekommen` jede abweichende Lage zurueck -- auch
+    /// ein `show-tab`/`show-pane`, das ein Skript ueber den Kern schickt. Wer
+    /// von aussen umschalten will, wartet deshalb, bis das hier `false` ist
+    /// (Steuerkanal `ui.kopf.wahlOffen`). Frist und Versuche wie dort.
+    var wahlOffen: Bool {
+        guard let s = kern.gewaehlteSitzung, wahlOffenFuer == s.id else { return false }
+        return Date().timeIntervalSince(wahlSeit) <= Self.wahlFrist && wahlVersuche < 3
+    }
 
     init(fenster: Fenster, kern: KernVerbindung) {
         self.fenster = fenster
@@ -560,6 +569,7 @@ final class Kopf: NSObject, NSPopoverDelegate {
             "hoehe": Int(hoehe.rounded()),
             "umschalter": angezeigt.rawValue,
             "wahl": fenster.oberflaeche.ansicht.rawValue,
+            "wahlOffen": wahlOffen,
             "buehne": buehne?.rawValue ?? "",
             // Der Umschalter Code | Agents: was er zeigt und ob der Umschalter
             // Orchestrator | Worker daneben gerade etwas zu schalten hat.

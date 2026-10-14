@@ -20,7 +20,10 @@ import WerkbankProtokoll
 /// Was Leiste und Blatt ausloesen -- das Fenster fuehrt es aus.
 @MainActor
 protocol Freigabehandlungen: AnyObject {
-    func entscheiden(_ f: OffeneFreigabe, annehmen: Bool, grund: String)
+    /// `echt`: ein Mensch hat geklickt. Ohne Vorgabewert, damit jeder Aufrufer
+    /// es ausdruecklich sagt (Befund 13.10.2026: der Steuerkanal erbte sonst den
+    /// Klick des Fensters und gab eine Rueckfrage als Mensch frei).
+    func entscheiden(_ f: OffeneFreigabe, annehmen: Bool, grund: String, echt: Bool)
     func freigabenBlattZeigen()
     func workerZeigen(sitzung: String, pane: String)
 }
@@ -145,8 +148,12 @@ struct FreigabeLeiste: View {
         }
     }
 
+    /// `echt: true`, denn ein Klick in der View ist ein Klick eines Menschen. GRENZE der
+    /// Bauart (13.10.2026, nur dokumentiert): ein Prozess desselben Benutzers mit
+    /// Bedienungshilfen-Recht kann den Knopf per AXPress druecken; das zaehlt ebenfalls
+    /// als echt. Gilt genauso fuer die Knoepfe in Freigaben.swift und ChatBloecke.swift.
     private func entscheiden(_ f: OffeneFreigabe, _ annehmen: Bool) {
-        handlungen.entscheiden(f, annehmen: annehmen, grund: zustand.grund.trimmingCharacters(in: .whitespacesAndNewlines))
+        handlungen.entscheiden(f, annehmen: annehmen, grund: zustand.grund.trimmingCharacters(in: .whitespacesAndNewlines), echt: true)
         zustand.grund = ""
     }
 }

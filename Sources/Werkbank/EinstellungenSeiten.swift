@@ -296,6 +296,10 @@ final class EinstellungenZustand {
     private(set) var kontextStand: [String: KontextAntwort] = [:]
     private(set) var filterStand: [String: String] = [:]
     private(set) var maschinenAntwort: [String: (ok: Bool, text: String)] = [:]
+    /// Die mobile Werkbank (Paket 10): Stand und Geraete aus `awb:mobil-stand` -- nie ein Code.
+    private(set) var mobilStand: JSONWert = .null
+    /// Der Kopplungscode steht NUR hier, zur Anzeige am Mac, bis er ablaeuft oder ausgeblendet wird.
+    private(set) var mobilCode: (code: String, ablauf: Double)?
     /// Der Testknopf der Meldungen: nil = nichts, .null = laeuft, sonst die Antwort.
     private(set) var meldungTest: JSONWert?
     /// Das Fenster stellt die Rueckfrage sichtbar (NSAlert-Sheet); kopflos bleibt sie Zustand.
@@ -335,6 +339,51 @@ final class EinstellungenZustand {
         let d = await kern.invoke("awb:ein-daten")
         if let w = d.wertJSON { datenAngekommen(w) }
         await schluesselStatusLaden()
+        await mobilLaden()
+    }
+
+    // MARK: Mobile Werkbank (Paket 10)
+    //
+    // Koppeln und Widerrufen gehen ueber `awb:mobil-koppeln`/`-widerrufen` mit
+    // `echt`: wahr nur fuer einen Klick in dieser sichtbaren Oberflaeche, nie fuer
+    // den Steuerkanal und nie kopflos. Der Kern prueft zusaetzlich `wb-mensch`.
+
+    func mobilLaden() async {
+        let a = await kern.invoke("awb:mobil-stand")
+        let neu = a.wertJSON.map(JSONWert.lesen) ?? .null
+        if neu != mobilStand { mobilStand = neu; neuBauen() }
+    }
+
+    func mobilKoppeln(echt: Bool) {
+        Task { @MainActor in
+            let a = await kern.invoke("awb:mobil-koppeln", [echt && !kopflos])
+            let j = a.wertJSON.map(JSONWert.lesen) ?? .null
+            if j["ok"].bool == true, let code = j["code"].text, let ablauf = j["ablauf"].zahl {
+                mobilCode = (code, ablauf)
+                neuBauen()
+                let rest = max(0, ablauf / 1000 - Date().timeIntervalSince1970) + 0.5
+                try? await Task.sleep(nanoseconds: UInt64(rest * 1_000_000_000))
+                if mobilCode?.code == code { mobilCode = nil }
+                await mobilLaden()
+                neuBauen()
+            } else {
+                melde(j["meldung"].text ?? a.fehler ?? "", "fehler")
+            }
+        }
+    }
+
+    func mobilCodeAusblenden() {
+        mobilCode = nil
+        neuBauen()
+    }
+
+    func mobilWiderrufen(_ deviceId: String, echt: Bool) {
+        Task { @MainActor in
+            let a = await kern.invoke("awb:mobil-widerrufen", [deviceId, echt && !kopflos])
+            let j = a.wertJSON.map(JSONWert.lesen) ?? .null
+            melde(j["meldung"].text ?? a.fehler ?? "", j["ok"].bool == true ? "gut" : "fehler")
+            await mobilLaden()
+        }
     }
 
     /// Ein neuer Stand vom Kern (`awb:ein-daten-neu` oder die Antwort auf `awb:ein-daten`).
@@ -935,10 +984,12 @@ struct SeitenBauer {
 
     func erlaubnisse() -> Seite {
         var v = Gruppe(id: "erlaubnisse.vorsicht", titel: t.t("gruppe.erlaubnisse.vorsicht"), vorsicht: true)
-        v.felder.append(feld("workerSkipPermissions", .schalter(an: d.settings["workerSkipPermissions"]?.bool != false, setzen: { an, _ in
-            if !an { self.setze("workerSkipPermissions", .bool(false)); return }
-            self.zustand.frage(self.t.t("frage.skipAn.text"), tun: self.t.t("frage.skipAn.tun")) { _, _ in self.setze("workerSkipPermissions", .bool(true)) }
-        }), schluessel: "workerSkipPermissions", wartet: true))
+        v.felder.append(feld("workerSkipPermissions", .schalter(an: d.settings["workerSkipPermissions"]?.bool != false, setzen: { an, echt in
+            if !an { self.werkzeug(["command": "worker-skip-permissions-set", "value": false], echt); return }
+            self.zustand.frage(self.t.t("frage.skipAn.text"), tun: self.t.t("frage.skipAn.tun"), mitGrund: true) { grund, echtJa in
+                self.werkzeug(["command": "worker-skip-permissions-set", "value": true, "grund": grund], echtJa)
+            }
+        }), wartet: true))
         v.felder.append(feld("workerWorktrees", .schalter(an: d.settings["workerWorktrees"]?.bool != false, setzen: { an, _ in
             self.setze("workerWorktrees", .bool(an))
         }), schluessel: "workerWorktrees", wartet: true))
@@ -1238,13 +1289,53 @@ struct SeitenBauer {
         var g2 = Gruppe(id: "maschinen.last", titel: t.t("gruppe.maschinen.last"))
         g2.felder.append(feld("maxWorkers", .zahl(wert: d.zahl("maxWorkers", 8), min: 1, max: 64, einheit: "Worker", setzen: { n, _ in self.setze("maxWorkers", .zahl(Double(n))) }),
                               schluessel: "maxWorkers"))
+        g2.felder.append(feld("schlafNachMinuten", .zahl(wert: d.zahl("schlafNachMinuten", 60), min: 0, max: 10080, einheit: t.t("wort.minuten"), setzen: { n, _ in self.setze("schlafNachMinuten", .zahl(Double(n))) }),
+                              schluessel: "schlafNachMinuten"))
         let maschinenwahl = [Option(wert: "local", label: t.t("wort.dieseMaschine", ["name": d.machine]))] + d.maschinen.map { Option(wert: $0, label: $0) }
         g2.felder.append(feld("defaultWorkerMachine", .wahl(wert: d.text("defaultWorkerMachine", "local"), optionen: maschinenwahl,
                                                             setzen: { w, _ in self.setze("defaultWorkerMachine", .text(w)) }), schluessel: "defaultWorkerMachine", wartet: true))
         g2.felder.append(feld("workerZustellung", .wahl(wert: d.text("workerZustellung", "auto"),
                                                         optionen: ["auto", "socket", "paste"].map { Option(wert: $0, label: t.t("wort.workerZustellung.\($0)")) },
                                                         setzen: { w, _ in self.setze("workerZustellung", .text(w)) }), schluessel: "workerZustellung", wartet: true))
-        return seite("maschinen", symbol: "desktopcomputer", [g, g2])
+        return seite("maschinen", symbol: "desktopcomputer", [g, g2, mobilGruppe()])
+    }
+
+    /// Die mobile Werkbank (Paket 10): derselbe Inhalt wie in der Electron-Fassung.
+    private func mobilGruppe() -> Gruppe {
+        var g = Gruppe(id: "maschinen.mobil", titel: t.t("gruppe.maschinen.mobil"))
+        g.felder.append(feld("mobileServer", .schalter(an: d.settings["mobileServer"]?.bool == true, setzen: { an, _ in
+            self.setze("mobileServer", .bool(an))
+        })))
+        let m = zustand.mobilStand
+        let stand = m["laeuft"].bool == true
+            ? t.t("mobil.stand.laeuft", ["port": String(Int(m["port"].zahl ?? 0)), "origin": m["origin"].text ?? ""])
+            : (m["fehler"].text ?? "").isEmpty ? t.t("mobil.stand.aus") : t.t("mobil.stand.fehler", ["grund": m["fehler"].text ?? ""])
+        var teile: [Einstellungsfeld] = [klartext("mobilStand", stand),
+                                         knopf("mobilKoppeln", t.t("mobil.koppeln")) { echt in self.zustand.mobilKoppeln(echt: echt) }]
+        if let c = zustand.mobilCode, c.ablauf / 1000 > Date().timeIntervalSince1970 {
+            let zeit = Date(timeIntervalSince1970: c.ablauf / 1000).formatted(date: .omitted, time: .standard)
+            teile.append(klartext("mobilCode", t.t("mobil.code", ["code": c.code])))
+            teile.append(klartext("mobilCodeAblauf", t.t("mobil.codeAblauf", ["zeit": zeit])))
+            teile.append(knopf("mobilCodeAusblenden", t.t("mobil.ausblenden")) { _ in self.zustand.mobilCodeAusblenden() })
+        }
+        var zeilen: [Zeile] = []
+        for geraet in m["geraete"].liste ?? [] {
+            let id = geraet["device_id"].text ?? ""
+            let aktiv = geraet["status"].text == "active"
+            var z = Zeile(id: "mobilGeraet:\(id)")
+            z.titel = geraet["device_name"].text ?? id
+            let ms = (aktiv ? geraet["paired_at"].zahl : (geraet["revoked_at"].zahl ?? geraet["paired_at"].zahl)) ?? 0
+            let wann = Date(timeIntervalSince1970: ms / 1000)
+            z.grund = t.t(aktiv ? "mobil.geraetAktiv" : "mobil.geraetWiderrufen", ["datum": wann.formatted(date: .numeric, time: .omitted)])
+            z.abgeschaltet = !aktiv
+            if aktiv {
+                z.rechts = [knopf("mobilWiderrufen-\(id)", t.t("mobil.widerrufen"), warnend: true) { echt in self.zustand.mobilWiderrufen(id, echt: echt) }]
+            }
+            zeilen.append(z)
+        }
+        teile.append(Einstellungsfeld("mobilGeraete", .zeilen(zeilen, leer: t.t("mobil.geraeteLeer"))))
+        g.felder.append(Einstellungsfeld("mobil", .stapel(teile)))
+        return g
     }
 
     // --- Seite 5: Aufsicht und Meldungen -----------------------------------
@@ -1377,6 +1468,10 @@ struct SeitenBauer {
         g2.felder.append(feld("terminalFontSize", .zahl(wert: d.zahl("terminalFontSize", 13), min: 8, max: 32, einheit: t.t("wort.einheit.punkt"), setzen: { n, _ in self.setze("terminalFontSize", .zahl(Double(n))) }), schluessel: "terminalFontSize"))
         g2.felder.append(feld("terminalScrollLines", .zahl(wert: d.zahl("terminalScrollLines", 3), min: 1, max: 20, einheit: t.t("wort.einheit.zeilen"), setzen: { n, _ in self.setze("terminalScrollLines", .zahl(Double(n))) }), schluessel: "terminalScrollLines"))
 
+        // Nur die Agentenfiguren und ihre Ringe (FigurUhr.swift); der Kern liest die Zahl im Takt nach.
+        var gFiguren = Gruppe(id: "aussehen.figuren", titel: t.t("gruppe.aussehen.figuren"))
+        gFiguren.felder.append(feld("figurenBildrate", .zahl(wert: d.zahl("figurenBildrate", 30), min: 10, max: 60, einheit: t.t("wort.einheit.bilderJeSekunde"), setzen: { n, _ in self.setze("figurenBildrate", .zahl(Double(n))) }), schluessel: "figurenBildrate"))
+
         var g3 = Gruppe(id: "aussehen.panes", titel: t.t("gruppe.aussehen.panes"))
         g3.felder.append(feld("minWorkerPaneWidth", .zahl(wert: d.zahl("minWorkerPaneWidth", 80), min: 20, max: 1000, einheit: t.t("wort.einheit.spalten"), setzen: { n, _ in self.setze("minWorkerPaneWidth", .zahl(Double(n))) }), schluessel: "minWorkerPaneWidth"))
         g3.felder.append(feld("maxWorkerPanesPerTab", .zahl(wert: d.zahl("maxWorkerPanesPerTab", 6), min: 0, max: 64, einheit: "Panes", setzen: { n, _ in self.setze("maxWorkerPanesPerTab", .zahl(Double(n))) }), schluessel: "maxWorkerPanesPerTab", wartet: true))
@@ -1399,7 +1494,7 @@ struct SeitenBauer {
             return z
         }
         g4.felder.append(feld("chatAnsichtVorgabe", .zeilen(rollen, leer: ""), schluessel: "chatAnsichtVorgabe", wartet: true, breit: true))
-        return seite("aussehen", symbol: "circle.lefthalf.filled", [g1, g2, g3, g4])
+        return seite("aussehen", symbol: "circle.lefthalf.filled", [g1, g2, gFiguren, g3, g4])
     }
 
     // --- Seite 7: Programm --------------------------------------------------

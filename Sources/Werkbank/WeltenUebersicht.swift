@@ -137,7 +137,7 @@ enum WeltenUebersichtWorte {
             "karten": kartenFolge(w).compactMap { id -> [String: Any]? in
                 guard let a = w.agent(id) else { return nil }
                 return ["id": a.id, "zustand": WeltenWorte.zustand(a.zustand), "text": a.zustandText,
-                        "wort": WeltenWorte.leben(a) ?? "", "ring": a.ring.rawValue, "zug": WeltenZustand.zugAuskunft(a),
+                        "wort": WeltenWorte.pauseZeile(a) ?? WeltenWorte.leben(a) ?? "", "ring": a.ring.rawValue, "zug": WeltenZustand.zugAuskunft(a),
                         "letzteMeldung": letzteMeldung(w, a.id)?.text ?? "", "ticketsOffen": offeneTickets(w, a.id).count,
                         "ungelesen": zustand.ungelesen(w, agent: a.id)]
             },
@@ -656,7 +656,7 @@ struct WeltenUebersicht: View {
                         .font(.callout).foregroundStyle(.secondary).lineLimit(1)
                     HStack(alignment: .firstTextBaseline, spacing: 5) {
                         Zustandspunkt(art: WeltenWorte.punkt(agent: a), basis: 7)
-                        WeltenLebenWort(agent: a, ohneLeben: a.zustandText.isEmpty ? WeltenWorte.zustand(a.zustand) : a.zustandText).lineLimit(1)
+                        WeltenLebenWort(agent: a, ohneLeben: a.zustandText.isEmpty ? WeltenWorte.zustand(a.zustand) : a.zustandText, zeile: true).lineLimit(1)
                     }
                     .font(.callout)
                     Group {
@@ -679,7 +679,7 @@ struct WeltenUebersicht: View {
         .buttonStyle(.plain)
         .help("Chat mit \(a.name) öffnen")
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(a.name), \(WeltenWorte.stufe(a.stufe)), \(WeltenWorte.leben(a) ?? a.zustandText), \(offen) Tickets offen\(ungelesen > 0 ? ", \(ungelesen) ungelesen" : "")")
+        .accessibilityLabel("\(a.name), \(WeltenWorte.stufe(a.stufe)), \(WeltenWorte.pauseZeile(a) ?? WeltenWorte.leben(a) ?? a.zustandText), \(offen) Tickets offen\(ungelesen > 0 ? ", \(ungelesen) ungelesen" : "")")
         .accessibilityAddTraits(.isButton)
         .accessibilityIdentifier("welten-karte-\(a.id)")
     }

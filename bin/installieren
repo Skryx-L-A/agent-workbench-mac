@@ -34,10 +34,13 @@ QUELLE="$MAC/build/Werkbank.app"
 WERKSTATT="$(mktemp -d)"
 trap 'rm -rf "$WERKSTATT"' EXIT
 ditto "$QUELLE" "$WERKSTATT/Werkbank.app"
-# Das Kopieren macht die Ad-hoc-Signatur nicht ungueltig, ein Nachsignieren
-# schadet aber nicht und faengt den Fall ab, dass ditto Erweiterungsattribute
-# verliert.
-codesign --force --deep --sign - "$WERKSTATT/Werkbank.app" 2>/dev/null || true
+# Das Kopieren macht die Signatur nicht ungueltig, ein Nachsignieren schadet
+# aber nicht und faengt den Fall ab, dass ditto Erweiterungsattribute verliert.
+# Dieselbe stabile Identitaet wie beim Bauen (mac/bin/signieren): nur so bleibt
+# das Designated Requirement gleich und macOS behaelt die Freigaben.
+bash "$MAC/bin/signieren" "$WERKSTATT/Werkbank.app" || true
+codesign -dr - "$WERKSTATT/Werkbank.app" 2>/dev/null | grep -q 'designated => cdhash' \
+  && echo "WARNUNG: ad hoc signiert -- macOS fragt nach diesem Neubau alle Freigaben erneut (docs/MAC-SIGNATUR.md)." >&2
 rm -rf "$ZIEL"
 mv "$WERKSTATT/Werkbank.app" "$ZIEL"
 /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$ZIEL"

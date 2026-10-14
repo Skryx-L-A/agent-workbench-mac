@@ -67,7 +67,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // legte es beim Start fuer einige Sekunden vor die Arbeit des Menschen,
             // bis `agents zeigen` es zuruecklegte (16.09.2026). Belegbilder zeichnen
             // es auch verdeckt (Glasbeleg, `screencapture -l`).
-            NSApp.setActivationPolicy(.regular)
+            // `.accessory` (11.10.2026): eine Testinstanz hat kein Dock-Symbol und steht nicht
+            // im App-Umschalter; der Nutzer hielt eine `.regular`-Instanz fuer eine zweite eigene
+            // Werkbank. Das Fenster bleibt sichtbar. Nur die Live-App (unten) ist `.regular`.
+            NSApp.setActivationPolicy(.accessory)
             fenster.fenster.orderBack(nil)
         } else {
             NSApp.setActivationPolicy(.regular)
@@ -135,8 +138,45 @@ if startUmgebung["WB_MANTEL_NEUSTART"] == nil, !gesteuert,
     }
 }
 
+// EINE WERKBANK JE LAUFVERZEICHNIS (11.10.2026, Auftrag einzelinstanz; Einzelinstanz.swift). Ein
+// zweiter Start nahm der laufenden App Steuerkanal, Token und kern.log. Jetzt holt er sie nach vorn
+// und endet, bevor Kernstart, Steuerkanal oder Umgebung irgendetwas anfassen.
+do {
+    let o = Laufoptionen.lesen()
+    let lauf = Einzelinstanz.laufdir()
+    let steuer = Einzelinstanz.steuerSocket(o, laufdir: lauf)
+    switch Einzelinstanz.sperren(laufdir: lauf, steuerSocket: steuer, pruefung: o.pruefmodus) {
+    case .belegt(let erste):
+        let antwort = Einzelinstanz.vorholen(erste, pruefung: o.pruefmodus)
+        FileHandle.standardError.write(Data("Werkbank: in \(lauf) laeuft schon eine Werkbank (PID \(erste.pid)) -- nach vorn gebeten (\(antwort.isEmpty ? "keine Antwort" : antwort)); dieser Start endet.\n".utf8))
+        exit(0)
+    case .unbekannt(let grund):
+        FileHandle.standardError.write(Data("Werkbank: Einzelinstanz nicht pruefbar (\(grund)); starte trotzdem.\n".utf8))
+    case .eigen:
+        if let alte = Einzelinstanz.aeltereAmSteuerkanal(steuer) {
+            if !o.pruefmodus, let a = NSRunningApplication(processIdentifier: alte) {
+                NSApplication.shared.yieldActivation(to: a)
+                a.activate(from: NSRunningApplication.current, options: [.activateAllWindows])
+            }
+            FileHandle.standardError.write(Data("Werkbank: an \(steuer) antwortet schon eine Werkbank ohne Sperre (PID \(alte)); dieser Start endet.\n".utf8))
+            exit(0)
+        }
+    }
+}
+
 // Vor dem Kernstart: ein Finder-/Dock-Start hat weder node noch tmux im PATH (Umgebung.swift).
 FileHandle.standardError.write(Data(Umgebung.herrichten().utf8))
+
+// EINE PRUEFUNG STELLT KEINE FENSTER WIEDER HER (Auftrag app-absturz-peek, 11.10.2026). Die
+// Wiederherstellung gehoert der Bundle-ID, nicht dem HOME: stuerzt eine Testinstanz kurz nach dem
+// Start mehrmals ab, haelt AppKit den naechsten Start mit „Fenster wieder oeffnen?" an (gemessen:
+// `NSPersistentUIRestorer promptToIgnorePersistentStateWithCrashHistory:` vor dem Steuerkanal). Wie
+// das Startargument `-ApplePersistenceIgnoreState YES`, nur ohne Umweg ueber `starten`.
+if Laufoptionen.lesen().pruefmodus {
+    var argumente = UserDefaults.standard.volatileDomain(forName: UserDefaults.argumentDomain)
+    argumente["ApplePersistenceIgnoreState"] = true
+    UserDefaults.standard.setVolatileDomain(argumente, forName: UserDefaults.argumentDomain)
+}
 
 let app = NSApplication.shared
 let delegate = AppDelegate()

@@ -26,20 +26,15 @@ the Mac shell's own labels are still German; the content follows the project.
 
 It carries the Swift package and nothing else — no core, no agent rules, no skills. The headless
 core (`app/`) it drives lives in a second public repository,
-**[agent-workbench](https://github.com/<your-github-user>/agent-workbench)**, and has to be built
+**[agent-workbench](https://github.com/Skryx-L-A/agent-workbench)**, and has to be built
 there first; INSTALL.md says how. The wider setup around all of it — rules, skills, hooks, the
 knowledge base — is a third repository,
-**[agent-setup](https://github.com/<your-github-user>/agent-setup)**. All three are built from the
+**[agent-setup](https://github.com/Skryx-L-A/agent-setup)**. All three are built from the
 same private source tree by the same script, so they never drift apart.
 
 Take this one if you are on a Mac and want the native shell instead of the Electron window. Take
 agent-workbench on its own on Linux, or if you would rather not build a second program to get the
 same sessions.
-
-`<your-github-user>` stands for the account these repositories are hosted under. It is a
-placeholder on purpose: the tool that extracts this repository from a working machine removes
-account names everywhere, and it cannot tell the account in a public URL from the one on the
-machine. The address bar you cloned from shows which one it is.
 
 ## What is in here
 
@@ -51,12 +46,12 @@ Sources/WerkbankProtokoll/  the wire protocol the shell and the core speak to ea
 Sources/awbmac-ctl/       a dependency-free CLI that talks to the running shell over a socket,
                           the Mac counterpart to the core's own awb-ctl
 assets/                   the drawn app icon, source for the rendered .icns
-bin/                      4 scripts: build, install, start, and the control client
-                          wrapper — nothing here runs without them
+bin/                      5 scripts: build, install, start, sign, and the control
+                          client wrapper — nothing here runs without them
 INSTALL.md                how to put all of it on your machine
 ```
 
-63 Swift files in total.
+65 Swift files in total.
 
 ## What is deliberately not in here
 
@@ -67,11 +62,11 @@ None of this is missing by accident, and none of it is needed to build or run th
   not resolve them anyway.
 - **The headless core** (`app/`) — it is a separate program with its own build, shared with the
   Electron window, and lives in
-  **[agent-workbench](https://github.com/<your-github-user>/agent-workbench)**.
+  **[agent-workbench](https://github.com/Skryx-L-A/agent-workbench)**.
 - **Acceptance and demo tooling** (`abnahme-welten`, `demo-welt`, `demo-skills`) — they check or
   show a *running* shell; they are not part of running one.
 - **Agent rules, skills, hooks, the knowledge base** — the wider setup around the workbench family,
-  in **[agent-setup](https://github.com/<your-github-user>/agent-setup)**.
+  in **[agent-setup](https://github.com/Skryx-L-A/agent-setup)**.
 
 ## What you have after installing
 
@@ -79,6 +74,10 @@ None of this is missing by accident, and none of it is needed to build or run th
   or a double-click in the Finder — not a wrapper around a source checkout.
 - **The shell starts its own core.** Point it at a built agent-workbench checkout once, and a
   launch from the Finder brings the core up with it; no terminal has to be open first.
+- **One running shell per run directory.** A second start for the same directory brings the
+  running window forward and exits before it touches sockets or the core.
+- **The Agents tab's worlds in a native window**, with approval of tickets that wait for a person
+  and the pause state beside the switch: a running turn still finishes, no new one starts.
 - **A control channel**, `awbmac-ctl`, for scripting and for checks that drive the shell without a
   human clicking through it.
 

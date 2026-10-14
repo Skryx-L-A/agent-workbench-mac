@@ -50,7 +50,7 @@ extension WeltenZustand {
         var sitzung = UUID()
         var entwurf = AgentEntwurf()
         var beschreibung = ""
-        var vorschlagModell = "sonnet5:high"
+        var vorschlagModell = "sonnet:high"
         var neuesTeam = false
         /// Felder, die der Mensch selbst gesetzt hat: sie gehen als Vorgaben in Vorschlag und Gespraech.
         var gesetzt: Set<String> = []
@@ -95,7 +95,7 @@ extension WeltenZustand {
         var a = AnlegenEntwurf()
         a.vorlagen = n.vorlagen
         a.modelle = n.modelle
-        a.entwurfModelle = n.entwurfModelle.isEmpty ? ["sonnet5:high"] : n.entwurfModelle
+        a.entwurfModelle = n.entwurfModelle.isEmpty ? ["sonnet:high"] : n.entwurfModelle
         a.vorschlagModell = a.entwurfModelle[0]
         a.entwurf.team = w.teams.first?.name ?? ""
         a.neuesTeam = w.teams.isEmpty

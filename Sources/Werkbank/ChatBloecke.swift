@@ -260,10 +260,14 @@ struct FreigabeBlockAnsicht: View {
                         Text(zustand.t("freigabe.erlauben")).fontWeight(.semibold).foregroundStyle(.tint)
                         Text(zustand.t("freigabe.ablehnen"))
                     } else {
-                        Button(zustand.t("freigabe.erlauben")) { zustand.freigabe(block.anfrageId, erlauben: true) }
+                        // Ein Klick in der View ist ein Klick eines Menschen. GRENZE der
+                        // Bauart (13.10.2026, nur dokumentiert): ein Prozess desselben
+                        // Benutzers mit Bedienungshilfen-Recht kann diesen Knopf per
+                        // AXPress druecken, und das zaehlt hier ebenfalls als echt.
+                        Button(zustand.t("freigabe.erlauben")) { zustand.freigabe(block.anfrageId, erlauben: true, echt: true) }
                             .keyboardShortcut(.defaultAction)
                             .accessibilityIdentifier("chat-freigabe-ja")
-                        Button(zustand.t("freigabe.ablehnen")) { zustand.freigabe(block.anfrageId, erlauben: false) }
+                        Button(zustand.t("freigabe.ablehnen")) { zustand.freigabe(block.anfrageId, erlauben: false, echt: true) }
                             .accessibilityIdentifier("chat-freigabe-nein")
                     }
                 }

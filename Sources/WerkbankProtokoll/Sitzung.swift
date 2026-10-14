@@ -119,11 +119,13 @@ public struct WahlModell: Sendable, Equatable, Identifiable {
     public let harnessLabel: String
     public let lokal: Bool
     public let startbar: Bool
+    public let wechselbar: Bool
     /// Der Deckel der Auslieferung (`maxEffort` der Registry), leer ohne Angabe.
     public let deckelRegistry: String
     init(_ j: JSONWert) {
         id = j["id"].text ?? ""; label = j["label"].text ?? ""; harness = j["harness"].text ?? ""
         harnessLabel = j["harnessLabel"].text ?? ""; lokal = j["lokal"].bool ?? false; startbar = j["startbar"].bool ?? false
+        wechselbar = j["wechselbar"].bool ?? false
         deckelRegistry = j["deckelRegistry"].text ?? ""
     }
 }

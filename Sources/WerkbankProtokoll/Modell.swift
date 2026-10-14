@@ -624,20 +624,24 @@ public struct ModellNutzlast: Codable, Sendable, Equatable {
     /// Die Reihenfolge der Leiste ueber beide Sorten (`leiste`, main.ts): EINE
     /// Sortierung fuer Terminal- und Chat-Sitzungen (der Nutzer, 12.08.).
     public let leiste: [LeistenEintrag]
+    /// Bilder je Sekunde der Agentenfiguren (`figurenBildrate`, FigurUhr.swift); fehlt das Feld, 30.
+    public let figurenBildrate: Int
     // `agentsBlattVorschau` (08.09. bis 14.09.2026) schaltete das Aufgaben-Blatt
     // aus Fassung 26 frei. Seit der Tab „Agents" die Welten zeigt (Auftrag
     // agentsui Nr. 6), gibt es nichts mehr freizuschalten: ein Kern oder eine
     // Einstellungsdatei, die das Feld noch fuehrt, wird beim Lesen ignoriert.
 
-    enum CodingKeys: String, CodingKey { case sessions, all, ui, selected, machine, schriftgroesse, maschinen, ampel, budget, capacity, chats, chatGezeigt, chatWerkstattGezeigt, leiste }
+    enum CodingKeys: String, CodingKey { case sessions, all, ui, selected, machine, schriftgroesse, maschinen, ampel, budget, capacity, chats, chatGezeigt, chatWerkstattGezeigt, leiste, figurenBildrate }
 
     public init(sessions: [SitzungsEintrag], selected: String, machine: String = "", schriftgroesse: Int = 13, all: Int = -1, ui: AnsichtsZustand = AnsichtsZustand(),
                 maschinen: [MaschinenStand] = [], ampel: [AmpelStand] = [], budget: BudgetStand? = nil, capacity: KapazitaetNutzlast = KapazitaetNutzlast(),
-                chats: [ChatEintrag] = [], chatGezeigt: String = "", chatWerkstattGezeigt: String = "", leiste: [LeistenEintrag] = []) {
+                chats: [ChatEintrag] = [], chatGezeigt: String = "", chatWerkstattGezeigt: String = "", leiste: [LeistenEintrag] = [],
+                figurenBildrate: Int = 30) {
         self.sessions = sessions; self.selected = selected; self.machine = machine; self.schriftgroesse = schriftgroesse
         self.all = all < 0 ? sessions.count : all; self.ui = ui
         self.maschinen = maschinen; self.ampel = ampel; self.budget = budget; self.capacity = capacity
         self.chats = chats; self.chatGezeigt = chatGezeigt; self.chatWerkstattGezeigt = chatWerkstattGezeigt; self.leiste = leiste
+        self.figurenBildrate = figurenBildrate
     }
 
     public init(from decoder: Decoder) throws {
@@ -656,6 +660,7 @@ public struct ModellNutzlast: Codable, Sendable, Equatable {
         chatGezeigt = try c.decodeIfPresent(String.self, forKey: .chatGezeigt) ?? ""
         chatWerkstattGezeigt = try c.decodeIfPresent(String.self, forKey: .chatWerkstattGezeigt) ?? ""
         leiste = (try? c.decodeIfPresent([LeistenEintrag].self, forKey: .leiste)) ?? []
+        figurenBildrate = (try? c.decodeIfPresent(Int.self, forKey: .figurenBildrate)) ?? 30
     }
 
     /// Die gezeigte Chat-Sitzung, wenn eine auf der Buehne liegt (oder ihr Worker).
@@ -943,13 +948,28 @@ public struct LageNutzlast: Codable, Sendable, Equatable {
     /// Wie `raster`, aber das Fenster traegt mehr Panes als gezeigt (Layout `split`).
     public let rasterTeil: Raster?
     public let fehlend: [Fehlend]
+    /// Ob die Anwendung im Pane die Maus verfolgt (tmux `mouse_*_flag`), zum
+    /// Zeitpunkt der Aufnahme -- `capture-pane` traegt diese Modi nicht mit.
+    public let maus: [String: Maus]
+    public struct Maus: Codable, Sendable, Equatable {
+        public let an: Bool
+        public let sgr: Bool
+        public init(an: Bool, sgr: Bool = true) { self.an = an; self.sgr = sgr }
+        public init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            an = try c.decodeIfPresent(Bool.self, forKey: .an) ?? false
+            sgr = try c.decodeIfPresent(Bool.self, forKey: .sgr) ?? true
+        }
+    }
 
-    enum CodingKeys: String, CodingKey { case art, cols, rows, aktiv, panes, inhalt, historie, spalten, frei, raster, rasterTeil, fehlend }
+    enum CodingKeys: String, CodingKey { case art, cols, rows, aktiv, panes, inhalt, historie, spalten, frei, raster, rasterTeil, fehlend, maus }
 
     public init(art: String = "pane", cols: Int = 80, rows: Int = 24, aktiv: String = "", panes: [Kachel] = [], inhalt: [String: String] = [:],
-                historie: [String: String] = [:], spalten: Int = 1, frei: Bool = false, raster: Raster? = nil, rasterTeil: Raster? = nil, fehlend: [Fehlend] = []) {
+                historie: [String: String] = [:], spalten: Int = 1, frei: Bool = false, raster: Raster? = nil, rasterTeil: Raster? = nil, fehlend: [Fehlend] = [],
+                maus: [String: Maus] = [:]) {
         self.art = art; self.cols = cols; self.rows = rows; self.aktiv = aktiv; self.panes = panes; self.inhalt = inhalt; self.historie = historie
         self.spalten = spalten; self.frei = frei; self.raster = raster; self.rasterTeil = rasterTeil; self.fehlend = fehlend
+        self.maus = maus
     }
 
     public init(from decoder: Decoder) throws {
@@ -966,6 +986,7 @@ public struct LageNutzlast: Codable, Sendable, Equatable {
         raster = try? c.decodeIfPresent(Raster.self, forKey: .raster)
         rasterTeil = try? c.decodeIfPresent(Raster.self, forKey: .rasterTeil)
         fehlend = try c.decodeIfPresent([Fehlend].self, forKey: .fehlend) ?? []
+        maus = (try? c.decodeIfPresent([String: Maus].self, forKey: .maus)) ?? [:]
     }
 }
 

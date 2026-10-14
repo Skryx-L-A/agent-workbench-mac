@@ -60,6 +60,7 @@ final class WeltenFenster: NSObject, NSWindowDelegate {
         } else {
             fenster.vorZeigen(ohneFokus: false)
         }
+        zustand.rueckfrageFensterRegistrieren(fenster, ort: .fenster)
         beiSichtbarkeit()
     }
 
@@ -70,7 +71,8 @@ final class WeltenFenster: NSObject, NSWindowDelegate {
 
     func sichtbaum(tiefe: Int) -> [String] { Glasbeleg.sichtbaum(fenster, tiefe: tiefe) }
 
-    /// Ist dieses Fenster vorn, zeigt es die Rueckfrage, sonst der Tab (WeltenZustand.rueckfrageImTab).
+    /// Ist dieses Fenster vorn, stellt es eine neue Rueckfrage, sonst der Tab (WeltenZustand.rueckfrageImTab);
+    /// eine schon offene bleibt, wo sie steht (WeltenZustand.rueckfrageOrt).
     func windowDidBecomeKey(_ notification: Notification) { zustand.fensterVorn = true }
     func windowDidResignKey(_ notification: Notification) { zustand.fensterVorn = false }
 

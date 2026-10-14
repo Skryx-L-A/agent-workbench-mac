@@ -51,6 +51,8 @@ final class KernVerbindung {
     /// Ein neuer Datenstand des Sitzungsfensters (`awb:sitz-daten-neu`, nach
     /// jeder Handlung, die die Lage aendert) -- roh, das Blatt liest ihn.
     @ObservationIgnored var aufSitzungNeu: ((Data) -> Void)?
+    /// Frische Harness-/Modellwahl nach einer Registry-Aenderung.
+    @ObservationIgnored var aufWahlNeu: ((Data) -> Void)?
     /// Eine beobachtete Datei hat sich geaendert (`awb:datei-geaendert`):
     /// `name` sagt, wer gemeint ist (`editor` fuer eine offene Datei des
     /// Editor-Blatts, sonst eine Seite), `pfad` welche.
@@ -167,7 +169,10 @@ final class KernVerbindung {
     private func ereignis(_ kanal: String, _ zeile: Data) {
         switch kanal {
         case "awb:model":
-            if let m = try? Nutzlast.lesen(ModellNutzlast.self, aus: zeile) { modell = m }
+            if let m = try? Nutzlast.lesen(ModellNutzlast.self, aus: zeile) {
+                modell = m
+                FigurUhr.geteilt.bildrateSetzen(m.figurenBildrate)
+            }
         case "awb:session":
             sitzung = try? Nutzlast.lesen(SitzungsNutzlast.self, aus: zeile)
         case "awb:layout":
@@ -196,6 +201,8 @@ final class KernVerbindung {
             aufEinstellungenNeu?(zeile)
         case "awb:sitz-daten-neu":
             aufSitzungNeu?(zeile)
+        case "awb:sitz-wahl-neu":
+            aufWahlNeu?(zeile)
         case "awb:sitz-startfehler":
             aufStartfehler?(zeile)
         case "awb:datei-geaendert":
@@ -374,8 +381,9 @@ final class KernVerbindung {
     /// Ueber einen Antrag entscheiden -- derselbe Weg wie die Electron-Leiste
     /// (`freigaben-entscheiden`, ruft `wb-decide`). Der Kern liest die Ablage
     /// danach neu und schickt `awb:freigaben`; erst das raeumt die Zeile ab.
-    func antragEntscheiden(pfad: String, annehmen: Bool, grund: String) {
-        bedienung("freigaben-entscheiden", ["path": pfad, "action": annehmen ? "approve" : "reject", "reason": grund])
+    /// `echt` wie bei `musterEntscheiden`: nur dann nimmt der Kern an (13.10.2026).
+    func antragEntscheiden(pfad: String, annehmen: Bool, grund: String, echt: Bool) {
+        bedienung("freigaben-entscheiden", ["path": pfad, "action": annehmen ? "approve" : "reject", "reason": grund, "echt": echt])
     }
 
     /// Ueber einen angehaltenen Befehl der Rueckfrage-Stufe entscheiden
@@ -418,7 +426,9 @@ final class KernVerbindung {
 
     func chatSenden(_ text: String) async -> Bool { jaNein(await invoke("awb:chat-senden", [text])) }
 
-    func chatFreigabe(_ anfrageId: String, erlauben: Bool) async -> Bool { jaNein(await invoke("awb:chat-freigabe", [anfrageId, erlauben])) }
+    /// `echt`: ein Mensch hat Knopf, Kuerzel oder Menue betaetigt -- nur dann
+    /// erlaubt der Kern (13.10.2026); der Steuerkanal setzt es nie.
+    func chatFreigabe(_ anfrageId: String, erlauben: Bool, echt: Bool) async -> Bool { jaNein(await invoke("awb:chat-freigabe", [anfrageId, erlauben, echt])) }
 
     func chatNeustart() async -> Bool { jaNein(await invoke("awb:chat-neustart")) }
 

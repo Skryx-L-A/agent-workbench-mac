@@ -22,7 +22,7 @@ build agent-workbench next to this checkout, so both share one parent directory:
 
 ```bash
 cd ..
-git clone https://github.com/<your-github-user>/agent-workbench.git
+git clone https://github.com/Skryx-L-A/agent-workbench.git
 cd agent-workbench/app
 npm ci
 npm run build
@@ -35,7 +35,7 @@ command-line tools, the role prompts. None of it is required just to start this 
 ## 2. Get this repository
 
 ```bash
-git clone https://github.com/<your-github-user>/agent-workbench-mac.git
+git clone https://github.com/Skryx-L-A/agent-workbench-mac.git
 cd agent-workbench-mac
 ```
 
@@ -59,8 +59,11 @@ bin/bauen
 ```
 
 Compiles both products with SwiftPM (`--debug` for a debug build), then assembles
-`build/Werkbank.app`: the executable, SwiftTerm's resource bundle, an `Info.plist`, and an ad-hoc
-signature so macOS 26 will run it. `bin/bauen` is the only supported way to get the bundle — a
+`build/Werkbank.app`: the executable, SwiftTerm's resource bundle, an `Info.plist`, and a
+signature from `bin/signieren`. It signs with the identity named in `WB_SIGN_ID`, else with a
+self-signed code-signing certificate called "Werkbank Dev" if your keychain has one, else ad hoc.
+With a certificate macOS keeps its permission grants across rebuilds; ad hoc, it asks again after
+every build. `bin/bauen` is the only supported way to get the bundle — a
 plain `swift build` alone leaves the pieces separate.
 
 ## 4. Install it

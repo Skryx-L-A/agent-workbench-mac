@@ -2,7 +2,7 @@
 //
 // Vorbild ist `app/src/renderer/ordner-view.ts`: der Projektordner der
 // gewaehlten Sitzung, sonst das Eigenheim; ausgeschlossene Pfade
-// (`~/Knowledge/90-secrets/`, `~/.ssh/`) entscheidet der Kern (main/folder.ts),
+// (`~/Knowledge/secrets/`, `~/.ssh/`) entscheidet der Kern (main/folder.ts),
 // dieses Blatt zeichnet nur, was es bekommt. Die Suche sitzt oben im selben
 // Blatt und ersetzt bei nicht-leerer Eingabe den Baum durch die Treffer --
 // „in derselben Leiste", nicht in einer eigenen.

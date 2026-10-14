@@ -131,6 +131,8 @@
 //          nimmt einen gemerkten Projektordner aus der Liste, nach `bestaetigen` (agentsform 16.09.2026);
 //          `welt-neu-auf` legt eine Welt auf einer Agent-Maschine an, `umziehen` bringt sie dorthin
 //          (fernwelten 15.09.2026).
+//          `board-breite <punkte>` setzt nur im Pruefmodus den fluechtigen Eingang der
+//          produktiven Board-Layoutberechnung (kopfloser Test mit zwei aufgebauten Ansichten).
 //   {"cmd":"figuren-schuss","pfad":"/…/bild.png","dunkel":"1"}      Belegbild des Vorschau-Blatts
 //   {"cmd":"quit"}                        sauber beenden
 import Foundation

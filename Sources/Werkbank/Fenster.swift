@@ -224,6 +224,7 @@ final class Fenster: NSObject, NSToolbarDelegate, NSWindowDelegate, NSMenuItemVa
         chatBuehne.sizingOptions = []
         weltenZustand = WeltenZustand()
         weltenZustand.kern = kern
+        weltenZustand.kopflos = optionen.kopflos
         weltenMitte = NSHostingView(rootView: WeltenMitteSpalte(kern: kern, zustand: weltenZustand))
         weltenMitte.sizingOptions = []
         editorZustand = EditorBlattZustand(kern: kern, optionen: optionen)
@@ -949,14 +950,17 @@ final class Fenster: NSObject, NSToolbarDelegate, NSWindowDelegate, NSMenuItemVa
     /// Die Blaetter des Inspektors stehen nur im Zustand Code; im Zustand Agents zeigt er die Welt.
     var freigabenBlattSichtbar: Bool { oberflaeche.modus == .code && !(inspektorItem?.isCollapsed ?? true) }
 
-    func entscheiden(_ f: OffeneFreigabe, annehmen: Bool, grund: String) {
+    func entscheiden(_ f: OffeneFreigabe, annehmen: Bool, grund: String, echt: Bool) {
         switch f.art {
         case .antrag:
-            kern.antragEntscheiden(pfad: f.pfad, annehmen: annehmen, grund: grund)
+            // Wie bei der Rueckfrage: ohne echten Klick nimmt der Kern nicht an
+            // (13.10.2026); wb-decide misst danach selbst noch einmal.
+            kern.antragEntscheiden(pfad: f.pfad, annehmen: annehmen, grund: grund, echt: echt && !optionen.kopflos)
         case .rueckfrage:
-            // `echt`: ein Mensch hat im Fenster geklickt -- kopflos gibt es
-            // keinen, und der Kern erteilt dann nicht (Ablehnen darf jeder).
-            kern.musterEntscheiden(schluessel: f.schluessel, annehmen: annehmen, grund: grund, echt: !optionen.kopflos)
+            // `echt`: ein Mensch hat im Fenster geklickt -- das sagt der Aufrufer
+            // (Knopf, Kuerzel: ja; Steuerkanal: nie), kopflos gibt es keinen.
+            // Der Kern erteilt ohne ihn nicht (Ablehnen darf jeder).
+            kern.musterEntscheiden(schluessel: f.schluessel, annehmen: annehmen, grund: grund, echt: echt && !optionen.kopflos)
         }
         freigabenZustand.melden(annehmen ? "Freigabe für \(f.wer) erteilt." : "Freigabe für \(f.wer) abgelehnt.")
     }
@@ -1070,6 +1074,9 @@ final class Fenster: NSObject, NSToolbarDelegate, NSWindowDelegate, NSMenuItemVa
     }
 
     /// Menuepunkte fuer die Leiste, damit jede Handlung ohne Maus geht (abnahme.md, Merkmal 11).
+    /// Steht, solange der Steuerkanal einen Menuepunkt ausloest (`hauptmenue`):
+    /// dann hat kein Mensch gedrueckt.
+    var menueVomSteuerkanal = false
     @objc func freigabeFreigeben(_ sender: Any?) { leisteEntscheiden(true) }
     @objc func freigabeAblehnen(_ sender: Any?) { leisteEntscheiden(false) }
     @objc func freigabeVor(_ sender: Any?) { blaettern(1) }
@@ -1077,7 +1084,10 @@ final class Fenster: NSObject, NSToolbarDelegate, NSWindowDelegate, NSMenuItemVa
 
     private func leisteEntscheiden(_ annehmen: Bool) {
         guard let f = freigabenZustand.vorne(offeneFreigaben) else { return }
-        entscheiden(f, annehmen: annehmen, grund: freigabenZustand.grund.trimmingCharacters(in: .whitespacesAndNewlines))
+        // Das Kuerzel traegt einen Menschen -- ausser der Steuerkanal loest den
+        // Menuepunkt aus (`hauptmenue`, Befund 13.10.2026).
+        entscheiden(f, annehmen: annehmen, grund: freigabenZustand.grund.trimmingCharacters(in: .whitespacesAndNewlines),
+                    echt: !menueVomSteuerkanal)
         freigabenZustand.grund = ""
     }
 
@@ -1405,6 +1415,7 @@ final class Fenster: NSObject, NSToolbarDelegate, NSWindowDelegate, NSMenuItemVa
         kopf.nachziehen()
         var raus = weltenZustand.auskunft(kern: kern, sichtbar: agentsSichtbar)
         raus["tab"] = agentsLage()
+        raus["figurUhr"] = FigurUhr.geteilt.auskunft()
         return raus
     }
 
@@ -1516,7 +1527,9 @@ final class Fenster: NSObject, NSToolbarDelegate, NSWindowDelegate, NSMenuItemVa
 
     private func chatOffeneFreigabe(_ erlauben: Bool) {
         guard let f = chatOffeneFrage else { return }
-        chat.freigabe(f.anfrageId, erlauben: erlauben)
+        // Das Kuerzel traegt einen Menschen -- ausser der Steuerkanal loest den
+        // Menuepunkt aus (`hauptmenue`); kopflos gibt es keinen.
+        chat.freigabe(f.anfrageId, erlauben: erlauben, echt: !menueVomSteuerkanal && !optionen.kopflos)
     }
 
     /// Orchestrator oder Worker zeigen -- der Kopf richtet die Buehne (Kopf.swift).
@@ -2413,6 +2426,42 @@ final class Aufteilung: NSSplitViewController {
         if animiert { seite.animator().isCollapsed = neu } else { seite.isCollapsed = neu }
         aufUmschalten?()
     }
+
+    /// DER HOVER-PEEK NUR, WO DIE SPALTE NEBEN DEN ANDEREN PLATZ HAT (Auftrag app-absturz-peek,
+    /// 11.10.2026). Ruht der Zeiger am Rand einer eingeklappten Seitenleiste oder eines
+    /// eingeklappten Inspektors, holt AppKit die Spalte in ihrer gemerkten Breite herein -- unter
+    /// macOS 26 ausserhalb des Vollbilds NEBEN die anderen, nicht darueber. Reicht die Fensterbreite
+    /// dafuer nicht, aendert AppKit mitten im Aufbau des Peeks den Fensterrahmen aus den
+    /// Constraints und stuerzt dabei ab (SIGSEGV 0x59 in `-[NSSplitView _cancelProactivePeek]`
+    /// unter `setFrameSize:`; Abstuerze des Nutzers vom 11.10., 03:37 und 03:44). Gemessen an einer
+    /// Testinstanz: Seitenleiste (mindestens 200) bei offenem Inspektor 300 und Inhalt mindestens
+    /// 400 -- ab 908 Punkten Fensterbreite steht der Peek, bei 907 stuerzt die App ab, beim
+    /// Inspektor (mindestens 300) dieselbe Grenze. Der Peek bleibt also, wo er passt; wo nicht, oeffnen Knopf, Menue und
+    /// Kuerzel die Spalte wie bisher (das Fenster waechst dann regulaer).
+    ///
+    /// Gefragt wird ueber eine private Methode des Delegaten: `mouseMoved:` am Rand fragt
+    /// `_canDoSidebarProactivePeek` bzw. `_canDoInspectorProactivePeek`, und die fragen hier,
+    /// bevor der Zeitgeber des Peeks ueberhaupt steht (gemessen). Die Antwort von
+    /// NSSplitViewController gilt weiter, hinzu kommt nur die Platzfrage. Fehlt die Methode in
+    /// einer kuenftigen Fassung, ruft AppKit diese hier nie -- dann bleibt alles wie heute, und
+    /// test-mac-fenster Schritt 16 wird rot.
+    @objc(_splitView:canProactivePeekArrangedView:)
+    func peekMoeglich(_ splitView: NSSplitView, arrangedView: NSView) -> Bool {
+        let sel = NSSelectorFromString("_splitView:canProactivePeekArrangedView:")
+        if let m = class_getInstanceMethod(NSSplitViewController.self, sel) {
+            typealias Frage = @convention(c) (AnyObject, Selector, NSSplitView, NSView) -> Bool
+            guard unsafeBitCast(method_getImplementation(m), to: Frage.self)(self, sel, splitView, arrangedView) else { return false }
+        }
+        guard let item = splitViewItems.first(where: { $0.viewController.view === arrangedView || $0.viewController.view.isDescendant(of: arrangedView) }) else { return true }
+        // Die MINDESTbreite: ist die gemerkte Breite groesser, staucht AppKit die Spalte fuer den Peek
+        // bis dorthin (gemessen: Seitenleiste 400 kam bei 908 Punkten mit 200 herein).
+        let zugabe = item.behavior == .sidebar ? Self.seitenleisteZugabe : 0
+        return splitView.fittingSize.width + item.minimumThickness + zugabe <= splitView.bounds.width
+    }
+
+    /// Der Abstand, den die Seitenleiste zusaetzlich zu ihrer Breite braucht (gemessen: 8 Punkte;
+    /// beim Inspektor reicht seine Breite allein, gemessen an derselben Grenze 907/908).
+    private static let seitenleisteZugabe: CGFloat = 8
 }
 
 /// DAS HAUPTFENSTER EINER PRUEFUNG DARF GROESSER SEIN ALS DER BILDSCHIRM (16.09.2026).

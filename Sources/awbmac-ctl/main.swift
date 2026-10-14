@@ -19,6 +19,7 @@
 //     schuss <pfad>         Belegbild des Fensters als PNG
 //     schirm [pane]         Text des Terminals mit der Tastatur, oder einer Kachel
 //     latenz [n]            Tastendruck -> Zeichen, n Runden (Vorgabe 20)
+//     scroll <pane|-> <zeilen> [shift] [praezise]  ein Rad-Ereignis in die Kachel (> 0 hoch)
 //     auswahl               alles auswaehlen, Text der Auswahl
 //     kopieren              Auswahl kopieren (kopflos: Merker statt Zwischenablage)
 //     zoom                  Pane zoomen, Zeit bis zum Neuzeichnen

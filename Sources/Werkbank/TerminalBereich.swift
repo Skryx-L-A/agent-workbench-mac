@@ -107,8 +107,41 @@ final class StromTerminal: TerminalView, @preconcurrency TerminalViewDelegate {
             feed(text: historie)
             rueckblickDa = true
         }
+        if let m = lage.maus[ziel] { mausAngleichen(m) }
         feed(text: inhalt)
         gefuettert = true
+    }
+
+    /// DER MAUSMODUS KOMMT MIT DER LAGE, NICHT AUS DEM SCHIRM (28.09.2026,
+    /// Auftrag rollrad -- Befund des Nutzers „das Scrollen klappt manchmal
+    /// einfach nicht, dann bewegt sich das ganze Fenster des Chats, aber ich
+    /// kann nicht im Chat scrollen").
+    ///
+    /// Claude Code verfolgt die Maus (ESC[?1003h, SGR 1006) und rollt seinen
+    /// Chat selbst -- das Rad muss als Mausmeldung an den Pane gehen. Diese
+    /// Modi setzt die Anwendung EINMAL beim Start; `capture-pane` traegt sie
+    /// nicht mit, und `resetToInitialState` oben nimmt sie weg. SwiftTerm
+    /// kannte sie also nur, wenn es den Start selbst im Strom gesehen hatte --
+    /// sonst rollte das Rad SwiftTerms eigenen Puffer, und der ganze Schirm
+    /// samt Eingabezeile wanderte als Bild nach oben. GEMESSEN kopflos
+    /// (test-mac-rollrad.sh): tmux `mouse_any_flag=1`, SwiftTerm `mouseMode
+    /// off`, drei Rastungen verschoben den Ausschnitt um drei Zeilen, die
+    /// Anwendung bekam nichts; startete sie bei gezeigtem Pane, bekam sie alle.
+    ///
+    /// Der Kern liest den Modus bei jeder Lage aus tmux (`maus`, main.ts
+    /// `mausFlags`), und zwar waehrend der Strom des Panes angehalten ist --
+    /// der Stand passt also genau zu diesem Schirm. Er wird hier als Steuerfolge
+    /// ins Terminal gegeben, so als kaeme sie vom Pane: SwiftTerm antwortet
+    /// darauf nichts, und jede spaetere Umschaltung der Anwendung im Strom gilt
+    /// wie bisher. Gesetzt wird 1000 (Druecken, Loslassen, Rad): tmux sagt nur
+    /// „an", nicht welche Stufe, und Bewegungsmeldungen braucht das Rad nicht.
+    private func mausAngleichen(_ m: LageNutzlast.Maus) {
+        let term = getTerminal()
+        if m.an, term.mouseMode == .off {
+            feed(text: "\u{1b}[?1000h" + (m.sgr ? "\u{1b}[?1006h" : ""))
+        } else if !m.an, term.mouseMode != .off {
+            feed(text: "\u{1b}[?1000l\u{1b}[?1002l\u{1b}[?1003l")
+        }
     }
 
     /// DER ROLLBALKEN VON SWIFTTERM BLEIBT AUS (08.09.2026, Auftrag geometrie,
@@ -881,9 +914,47 @@ final class TerminalBereich: NSView {
                 // die unterste Zeile des Panes darf nie unter die Kante rutschen.
                 "schirmY": k.terminal.map { Int($0.frame.minY.rounded()) } ?? 0,
                 "reihe": i < gelegt.count ? Kachelung.reihenIndex(gelegt)[i] : 0,
+                // Wo der Ausschnitt steht und wem das Rad gehoert (Auftrag rollrad).
+                "rollen": k.terminal.map { rollstand($0) } ?? [:],
             ]
             return r
         }
+    }
+
+    /// Der Ausschnitt eines Terminals: oberste sichtbare Zeile im Puffer
+    /// (`oben`, 0 = ganz oben), ob er am unteren Ende steht, welcher Puffer
+    /// gilt und ob SwiftTerm das Rad als Mausmeldung an die Anwendung gibt.
+    func rollstand(_ t: TerminalView) -> [String: Any] {
+        let term = t.getTerminal()
+        return ["oben": term.getTopVisibleRow(), "position": t.scrollPosition, "kannRollen": t.canScroll,
+                "alternativ": term.isCurrentBufferAlternate, "maus": "\(term.mouseMode)"]
+    }
+
+    /// EIN RAD-EREIGNIS, WIE DER MENSCH ES GIBT (Auftrag rollrad, 28.09.2026).
+    /// Kopflos gibt es keinen Zeiger; gebaut wird deshalb ein echtes
+    /// Scrollereignis (CGEvent, Rastungen oder Bildpunkte wie ein Trackpad),
+    /// und zugestellt wird es an die Ansicht, die AppKit unter der Mitte der
+    /// Kachel findet (`hitTest`) -- derselbe Weg wie beim Menschen, samt der
+    /// Frage, WELCHE Ansicht es bekommt. `zeilen` > 0 rollt nach oben.
+    func radGeben(pane: String, zeilen: Int, shift: Bool, praezise: Bool) -> [String: Any]? {
+        let ziel = pane.isEmpty ? terminal : terminals[pane]
+        guard let t = ziel, let kachel = kacheln.first(where: { $0.terminal === t }), let fenster = window,
+              let inhalt = fenster.contentView else { return nil }
+        let sichtbar = t.convert(t.bounds, to: kachel).intersection(kachel.bounds)
+        let mitte = kachel.convert(CGPoint(x: sichtbar.midX, y: sichtbar.midY), to: nil)
+        let vorher = rollstand(t)
+        let rahmenVorher = frame
+        let getroffen = inhalt.hitTest(inhalt.superview?.convert(mitte, from: nil) ?? mitte)
+        guard let cg = CGEvent(scrollWheelEvent2Source: nil, units: praezise ? .pixel : .line, wheelCount: 1,
+                               wheel1: Int32(praezise ? zeilen * 16 : zeilen), wheel2: 0, wheel3: 0) else { return nil }
+        cg.location = CGPoint(x: fenster.frame.minX + mitte.x, y: (NSScreen.screens.first?.frame.height ?? 0) - (fenster.frame.minY + mitte.y))
+        if shift { cg.flags = .maskShift }
+        guard let ev = NSEvent(cgEvent: cg) else { return nil }
+        getroffen?.scrollWheel(with: ev)
+        return ["pane": (t as? StromTerminal)?.pane ?? "", "getroffen": getroffen.map { String(describing: type(of: $0)) } ?? "",
+                "trifftTerminal": getroffen === t, "vorher": vorher, "nachher": rollstand(t),
+                "deltaY": ev.scrollingDeltaY, "praezise": ev.hasPreciseScrollingDeltas,
+                "bereichBewegt": frame != rahmenVorher]
     }
 
     var buehneGroesse: (b: Int, h: Int) { (Int(flaeche.bounds.width), Int(flaeche.bounds.height)) }
