@@ -1,8 +1,17 @@
 #!/bin/bash
 # starten [--kopflos|--ohne-fokus] [--terminal strom|attach] [--stop] [--status]
 #
-# Startet den Kern (app/ kopflos, wie `shell/wb-dev --kopflos`) und die
-# Mac-App -- kopflos ohne sichtbares Fenster fuer Pruefungen, sonst sichtbar.
+# Startet die Mac-App, und die App startet ihren Kern (app/ kopflos) selbst
+# als eigenes Kind (Kernstart.swift) -- kopflos ohne sichtbares Fenster fuer
+# Pruefungen, sonst sichtbar.
+#
+# DIE APP IST ELTERNPROZESS DES KERNS (14.10.2026, Auftrag wz-mantel2). Bis
+# dahin startete dieses Skript den Kern selbst und die App daneben. Der Kern
+# erkennt die App aber an der Peer-PID ihrer Verbindung (= process.ppid,
+# mantel.ts): auf dem alten Weg galt die App als fremd, und eine fremde
+# Verbindung darf weder tippen noch freigeben. Deshalb setzt das Skript
+# AWB_MANTEL_SOCKET/AWB_MANTEL_TOKEN NICHT mehr (und entfernt geerbte), damit
+# Kernstart.swift greift; den Kernordner gibt es als AWB_APP_DIR mit.
 #
 # --ohne-fokus liegt dazwischen: das Fenster steht auf dem Bildschirm (nur dann
 # zeichnet AppKit eine `List` oder eine `Table`), aber die App wird nie aktiviert
@@ -52,8 +61,20 @@ while [ $# -gt 0 ]; do
   shift
 done
 mkdir -p "$LAUF"
-export AWB_MANTEL_SOCKET="$LAUF/mantel.sock"
-export AWB_CONTROL_SOCKET="${AWB_CONTROL_SOCKET:-$LAUF/awb.sock}"
+# Den Mantel legt die App an (Kernstart.swift: <laufdir>/mantel.sock, Token je
+# Lauf). Geerbte Werte -- etwa aus dem tmux-Env eines Agenten -- wuerden die App
+# an einen fremden Kern haengen, also weg damit.
+#
+# DASSELBE GILT FUER DEN STEUERKANAL DES KERNS (14.10.2026, Review-Fund F1b):
+# ein Agenten-Pane traegt AWB_CONTROL_SOCKET des LAUFENDEN Kerns (awb-<uid>.sock,
+# gemessen). Uebernommen, schickte `stoppen` sein `quit` an Kern des Nutzers, und
+# der neue Kern wollte am selben Pfad lauschen. Der Kern dieses Laufs lauscht
+# deshalb immer im Laufverzeichnis, und nur dorthin geht ein `quit`.
+MANTEL_SOCK="$LAUF/mantel.sock"
+unset AWB_MANTEL_SOCKET AWB_MANTEL_TOKEN AWB_CONTROL_SOCKET
+export AWBMAC_LAUFDIR="$LAUF"
+export AWB_APP_DIR="$APP_KERN"
+export AWB_CONTROL_SOCKET="$LAUF/awb.sock"
 export AWBMAC_CONTROL_SOCKET="${AWBMAC_CONTROL_SOCKET:-$LAUF/awbmac.sock}"
 export AWBMAC_TERMINAL="$ART"
 CTL="$MAC/bin/awbmac-ctl"
@@ -65,7 +86,7 @@ lebt() { local p; p="$(cat "$1" 2>/dev/null)"; [ -n "$p" ] && kill -0 "$p" 2>/de
 # beim listen, der Kern blieb stehen). Also VOR dem ersten Prozess pruefen.
 pfad_pruefen() {
   local p
-  for p in "$AWB_MANTEL_SOCKET" "$AWB_CONTROL_SOCKET" "$AWBMAC_CONTROL_SOCKET"; do
+  for p in "$MANTEL_SOCK" "$AWB_CONTROL_SOCKET" "$AWBMAC_CONTROL_SOCKET"; do
     if [ "${#p}" -gt 103 ]; then
       echo "starten: Socketpfad laenger als 103 Bytes (sun_path): $p -- kuerzeres AWBMAC_LAUFDIR waehlen" >&2
       return 1
@@ -74,18 +95,74 @@ pfad_pruefen() {
 }
 
 # Der Kern DIESES Laufverzeichnisses ohne PID-Datei: die kopflosen Electron-
-# Prozesse dieses app/-Ordners, deren Umgebung unseren Mantel-Socket traegt
+# Prozesse dieses app/-Ordners (Kernstart startet `…/MacOS/Electron <app>`,
+# aeltere Laeufe `…/.bin/electron <app>`, daher `lectron`), deren Umgebung
+# unseren Mantel-Socket traegt
 # (ps -E zeigt die Umgebung eigener Prozesse). Faengt den Fall, dass die
 # PID-Datei weg ist (Laufverzeichnis geloescht, Datei ueberschrieben), ohne je
 # einen fremden Kern zu treffen: ein anderes Laufverzeichnis hat einen anderen
 # Socketpfad.
 kern_ohne_pid() {
   local p
-  for p in $(pgrep -f "electron $APP_KERN --headless" 2>/dev/null); do
-    if ps -E -o command= -p "$p" 2>/dev/null | tr ' ' '\n' | grep -qx "AWB_MANTEL_SOCKET=$AWB_MANTEL_SOCKET"; then
+  for p in $(pgrep -f "lectron $APP_KERN --headless" 2>/dev/null); do
+    if ps -E -o command= -p "$p" 2>/dev/null | tr ' ' '\n' | grep -qx "AWB_MANTEL_SOCKET=$MANTEL_SOCK"; then
       echo "$p"
     fi
   done
+}
+
+# IST <pid> DER KERN DIESES LAUFVERZEICHNISSES? (14.10.2026, Review-Fund F1a/c)
+# Eine PID-Datei allein beweist nichts: nach einem Neustart der Maschine oder
+# einem Absturz kann ihre Nummer einem fremden Prozess gehoeren (bis dahin
+# genuegte `kill -0`, und baum_beenden haette dessen ganzen Baum beendet, im
+# schlimmsten Fall einen tmux-Server). Verlangt werden deshalb das Kommando des
+# Kerns (`…lectron <app> --headless`), UNSER Mantel-Socket in seiner Umgebung
+# (`ps -E`; nur Name=Wert verglichen, nichts ausgegeben -- dort steht auch der
+# Token) und, mit <pid-datei>, ein Prozessstart nicht nach dem Schreiben der
+# Datei (Kernstart.swift schreibt kern.pid direkt nach dem Start).
+kern_ist_unserer() {
+  local p="$1" datei="${2:-}" cmd alter mtime
+  cmd="$(ps -ww -o command= -p "$p" 2>/dev/null)" || return 1
+  case "$cmd" in *"lectron $APP_KERN --headless"*) ;; *) return 1 ;; esac
+  ps -ww -E -o command= -p "$p" 2>/dev/null | tr ' ' '\n' | grep -qx "AWB_MANTEL_SOCKET=$MANTEL_SOCK" || return 1
+  [ -n "$datei" ] || return 0
+  alter="$(prozess_alter "$p")" || return 1
+  mtime="$(stat -f %m "$datei" 2>/dev/null)" || return 1
+  # Start = jetzt - Alter; 2 s Spiel fuer die Rundung von etime und mtime.
+  [ $(( $(date +%s) - alter )) -le $(( mtime + 2 )) ]
+}
+
+# Alter eines Prozesses in Sekunden aus `ps -o etime=` ([[tt-]hh:]mm:ss).
+prozess_alter() {
+  local e t=0 tage=0 teil
+  e="$(ps -o etime= -p "$1" 2>/dev/null | tr -d ' ')"
+  [ -n "$e" ] || return 1
+  case "$e" in *-*) tage="${e%%-*}"; e="${e#*-}" ;; esac
+  local IFS=:
+  for teil in $e; do t=$(( t*60 + 10#$teil )); done
+  echo $(( tage*86400 + t ))
+}
+
+# Haengt <pid> an einer LEBENDEN Werkbank-App? Dann gehoert der Kern ihr -- etwa
+# der App, die der Nutzer aus Dock oder Finder gestartet hat und die keine app.pid
+# schreibt (die schreibt nur dieses Skript). Ein solcher Kern wird nie beendet.
+# Erkannt am Kommando des Elternprozesses (auch die Test-Attrappe, ein Skript
+# unter `…/MacOS/Werkbank`, steht dort mit ihrem Pfad).
+kern_hat_app() {
+  local pp cmd
+  pp="$(ps -o ppid= -p "$1" 2>/dev/null | tr -d ' ')"
+  [ -n "$pp" ] && [ "$pp" != 1 ] || return 1
+  cmd="$(ps -ww -o command= -p "$pp" 2>/dev/null)" || return 1
+  case " $cmd " in *"/MacOS/Werkbank "*) echo "$pp"; return 0 ;; esac
+  return 1
+}
+
+# Haelt eine Werkbank-App die Einzelinstanz-Sperre dieses Laufverzeichnisses
+# (Einzelinstanz.swift: flock auf <laufdir>/instanz.lock)? Probeweise sperren und
+# sofort wieder freigeben; fehlt die Datei, haelt sie niemand.
+instanz_belegt() {
+  [ -e "$LAUF/instanz.lock" ] || return 1
+  perl -MFcntl=:flock -e 'open(my $f, "<", $ARGV[0]) or exit 1; exit(flock($f, LOCK_EX|LOCK_NB) ? 1 : 0)' "$LAUF/instanz.lock"
 }
 
 # Dasselbe fuer die App: Werkbank-Prozesse, deren Umgebung UNSEREN Steuerkanal traegt.
@@ -138,30 +215,59 @@ baum_beenden() {
   return 0
 }
 
+# Den Kern <pid> beenden: erst hoeflich ueber den Steuerkanal DIESES Laufs (nie
+# einen geerbten), dann den ganzen Baum.
+kern_beenden() {
+  local p="$1" d
+  node "$APP_KERN/bin/awb-ctl" --socket "$LAUF/awb.sock" quit >/dev/null 2>&1
+  d=$((SECONDS+8)); while [ $SECONDS -lt $d ] && kill -0 "$p" 2>/dev/null; do sleep 0.2; done
+  kill -0 "$p" 2>/dev/null && baum_beenden "$p"
+  return 0
+}
+
 stoppen() {
-  local p
+  local p a verschont=0
   if p="$(lebt "$LAUF/app.pid")"; then
     "$CTL" quit >/dev/null 2>&1
     local d=$((SECONDS+5)); while [ $SECONDS -lt $d ] && kill -0 "$p" 2>/dev/null; do sleep 0.2; done
     kill -0 "$p" 2>/dev/null && kill "$p" 2>/dev/null
     sleep 0.5; kill -0 "$p" 2>/dev/null && kill -9 "$p" 2>/dev/null
   fi
-  if p="$(lebt "$LAUF/kern.pid")"; then
-    node "$APP_KERN/bin/awb-ctl" --socket "$AWB_CONTROL_SOCKET" quit >/dev/null 2>&1
-    local d=$((SECONDS+8)); while [ $SECONDS -lt $d ] && kill -0 "$p" 2>/dev/null; do sleep 0.2; done
-    kill -0 "$p" 2>/dev/null && baum_beenden "$p"
-  fi
-  # Und was die PID-Datei nicht kennt (06.09.: ein Kern blieb stehen, weil sein
-  # Laufverzeichnis nicht mehr zur Datei passte): jeden Kern mit UNSEREM
-  # Mantel-Socket in der Umgebung beenden.
+  # Erst alle Apps dieses Laufs, dann die Kerne: haengt danach noch ein Kern an
+  # einer lebenden Werkbank-App, ist es nicht unsere (kern_hat_app) und er bleibt.
   for p in $(app_ohne_pid); do
     echo "starten --stop: App ohne PID-Datei gefunden (PID $p), wird beendet" >&2
     baum_beenden "$p"
   done
+  if p="$(lebt "$LAUF/kern.pid")"; then
+    if ! kern_ist_unserer "$p" "$LAUF/kern.pid"; then
+      echo "starten --stop: kern.pid nennt PID $p, das ist nicht der Kern dieses Laufs -- nicht beendet" >&2
+    elif a="$(kern_hat_app "$p")"; then
+      echo "starten --stop: der Kern (PID $p) gehoert der laufenden Werkbank-App $a -- nicht beendet" >&2
+      verschont=1
+    else
+      kern_beenden "$p"
+    fi
+  fi
+  # Und was die PID-Datei nicht kennt (06.09.: ein Kern blieb stehen, weil sein
+  # Laufverzeichnis nicht mehr zur Datei passte): jeden Kern mit UNSEREM
+  # Mantel-Socket in der Umgebung beenden -- ausser er haengt an einer App.
   for p in $(kern_ohne_pid); do
+    if a="$(kern_hat_app "$p")"; then
+      echo "starten --stop: der Kern (PID $p) gehoert der laufenden Werkbank-App $a -- nicht beendet" >&2
+      verschont=1; continue
+    fi
     echo "starten --stop: Kern ohne PID-Datei gefunden (PID $p), wird beendet" >&2
     baum_beenden "$p"
   done
+  # Lebt hier noch eine fremde Werkbank (ein verschonter Kern, eine App mit der
+  # Einzelinstanz-Sperre), gehoeren PID-Dateien und Sockets ihr: liegen lassen,
+  # sonst verliert ihre App den Mantel und `awbmac-ctl` den Steuerkanal.
+  if [ "$verschont" = 1 ] || instanz_belegt; then
+    echo "starten --stop: eine andere Werkbank lebt in $LAUF -- ihre Sockets und PID-Dateien bleiben" >&2
+    rm -f "$LAUF/app.pid"
+    return 0
+  fi
   rm -f "$LAUF/app.pid" "$LAUF/kern.pid" "$LAUF/mantel.sock" "$LAUF/awbmac.sock"
   [ "$AWB_CONTROL_SOCKET" = "$LAUF/awb.sock" ] && rm -f "$LAUF/awb.sock"
   return 0
@@ -297,50 +403,88 @@ trap 'abbruch EXIT' EXIT
 # App schon anderweitig lief.
 erfolg() { KERN_SELBST=0; APP_SELBST=0; trap - TERM INT HUP EXIT; exit 0; }
 
-[ -x "$APP_KERN/node_modules/.bin/electron" ] || { echo "starten: app/node_modules fehlt -- 'npm install' in app/" >&2; exit 1; }
+# Die Electron-Binaerdatei, die Kernstart.swift startet (electronPfad) -- nicht
+# der Node-Shim `.bin/electron`.
+ELECTRON="$APP_KERN/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron"
+[ -x "$ELECTRON" ] || { echo "starten: app/node_modules fehlt -- 'npm install' in app/" >&2; exit 1; }
 [ -f "$APP_KERN/dist/main/main.js" ] || (cd "$APP_KERN" && npm run build >/dev/null 2>&1) || { echo "starten: app/dist fehlt und laesst sich nicht bauen" >&2; exit 1; }
 WERKBANK="$MAC/build/Werkbank.app/Contents/MacOS/Werkbank"
 [ -x "$WERKBANK" ] || { echo "starten: $WERKBANK fehlt -- mac/bin/bauen" >&2; exit 1; }
 
-if p="$(lebt "$LAUF/kern.pid")"; then
-  echo "Kern laeuft bereits (PID $p)"
-else
-  # Token fuer den Handschlag: zufaellig je Lauf, nur in der Umgebung der beiden Prozesse.
-  AWB_MANTEL_TOKEN="$(head -c 16 /dev/urandom | xxd -p)"
-  export AWB_MANTEL_TOKEN
-  umask 077; printf '%s' "$AWB_MANTEL_TOKEN" > "$LAUF/mantel.token"; umask 022
-  : > "$LAUF/kern.log"
-  "$APP_KERN/node_modules/.bin/electron" "$APP_KERN" --headless >>"$LAUF/kern.log" 2>&1 &
-  echo $! > "$LAUF/kern.pid"
-  KERN_SELBST=1
-  d=$((SECONDS+60))
-  while [ $SECONDS -lt $d ]; do
-    grep -q '^awb-ready ' "$LAUF/kern.log" && break
-    # Kein `rm -f kern.pid` mehr VOR abbruch (08.09.2026, Gegenlesen -- dieselbe
-    # Asymmetrie, die beim App-Zweig schon behoben wurde): stoppen(), das
-    # abbruch() hier ueber KERN_SELBST anstoesst, liest die PID-Datei selbst
-    # und entfernt sie am Ende ohnehin -- eine vorzeitige Loeschung bringt
-    # nichts, nur ein abweichendes Muster gegenueber dem App-Zweig.
-    kill -0 "$(cat "$LAUF/kern.pid")" 2>/dev/null || { echo "starten: der Kern ist sofort wieder beendet:" >&2; tail -15 "$LAUF/kern.log" >&2; abbruch; }
-    sleep 0.3
-  done
-  grep -q '^awb-ready ' "$LAUF/kern.log" || { echo "starten: der Kern meldete keine Bereitschaft (60 s)" >&2; tail -15 "$LAUF/kern.log" >&2; abbruch; }
-  echo "Kern laeuft (PID $(cat "$LAUF/kern.pid")), Steuerkanal $AWB_CONTROL_SOCKET"
-fi
-[ -n "${AWB_MANTEL_TOKEN:-}" ] || AWB_MANTEL_TOKEN="$(cat "$LAUF/mantel.token" 2>/dev/null)"
-export AWB_MANTEL_TOKEN
-
 if p="$(lebt "$LAUF/app.pid")"; then
   echo "App laeuft bereits (PID $p)"
+  if k="$(lebt "$LAUF/kern.pid")"; then echo "Kern laeuft (PID $k), Steuerkanal $AWB_CONTROL_SOCKET"
+  else echo "starten: die App laeuft, ihr Kern nicht -- 'starten --stop' und neu starten" >&2; fi
   erfolg
 fi
+# Ein Kern ohne App hat keine App als Elternprozess (eine abgestuerzte App, ein
+# Lauf auf dem alten Weg). Die App startet gleich ihren eigenen; der alte hielte
+# sonst den Mantel-Socket (mantel.ts bindet keinen zweiten) und naehme die neue
+# App als fremd.
+#
+# KERN des Nutzers NIE (14.10.2026, Review-Fund F1): die App aus Dock oder Finder
+# schreibt keine app.pid, ihr Kern stuende hier sonst als "Kern ohne App" da.
+# Zwei unabhaengige Riegel, beide vor dem ersten Signal:
+#   1  Haelt eine App die Einzelinstanz-Sperre dieses Laufverzeichnisses, laeuft
+#      dort schon eine Werkbank. Unsere App wuerde ohnehin sofort weichen
+#      (Einzelinstanz), also abbrechen, ohne irgendetwas zu beenden.
+#   2  Jeder Kandidat muss der Kern DIESES Laufs sein (kern_ist_unserer:
+#      Kommando, Mantel-Socket, Startzeit gegen kern.pid), und keiner darf an
+#      einer lebenden Werkbank-App haengen (kern_hat_app) -- sonst ebenfalls
+#      abbrechen. Riegel 2 deckt eine App, die die Sperre (noch) nicht haelt:
+#      eine aeltere Fassung ohne instanz.lock oder ein anderes Laufverzeichnis
+#      der Sperre.
+# Erst wenn alle Kandidaten geprueft sind, wird einer beendet.
+if instanz_belegt; then
+  echo "starten: eine Werkbank-App haelt $LAUF/instanz.lock -- dort laeuft schon eine Werkbank; nichts beendet, nichts gestartet" >&2
+  exit 1
+fi
+KANDIDATEN=""
+if p="$(lebt "$LAUF/kern.pid")"; then
+  if kern_ist_unserer "$p" "$LAUF/kern.pid"; then KANDIDATEN="$p"
+  else echo "starten: kern.pid nennt PID $p, das ist nicht der Kern dieses Laufs -- nicht beendet" >&2; fi
+fi
+for p in $(kern_ohne_pid); do
+  case " $KANDIDATEN " in *" $p "*) ;; *) KANDIDATEN="$KANDIDATEN $p" ;; esac
+done
+for p in $KANDIDATEN; do
+  if a="$(kern_hat_app "$p")"; then
+    echo "starten: der Kern (PID $p) gehoert der laufenden Werkbank-App $a -- nichts beendet, nichts gestartet" >&2
+    exit 1
+  fi
+done
+for p in $KANDIDATEN; do
+  echo "starten: Kern ohne App (PID $p) wird beendet, die App startet ihren eigenen" >&2
+  kern_beenden "$p"
+done
+# Ohne alte PID-Datei und altes Protokoll: Bereitschaft heisst eine awb-ready-Zeile
+# des NEUEN Kerns, dessen PID die App schreibt.
+rm -f "$LAUF/kern.pid"; : > "$LAUF/kern.log"
+
 ARGS=(--terminal "$ART")
 [ "$KOPFLOS" = 1 ] && ARGS+=(--kopflos)
 [ "$OHNE_FOKUS" = 1 ] && ARGS+=(--ohne-fokus)
 : > "$LAUF/app.log"
 "$WERKBANK" "${ARGS[@]}" >>"$LAUF/app.log" 2>&1 &
 echo $! > "$LAUF/app.pid"
+# Der Kern dieses Laufs gehoert der App, die DIESER Aufruf startet: bricht der
+# Start ab, gehen beide (baum_beenden auf die App erfasst den Kern als Kind,
+# der KERN_SELBST-Zweig von abbruch() faengt einen Kern, der sich geloest hat).
 APP_SELBST=1
+KERN_SELBST=1
+kern_bereit() { grep -q '^awb-ready ' "$LAUF/kern.log" 2>/dev/null && [ -n "$(lebt "$LAUF/kern.pid")" ]; }
+d=$((SECONDS+60))
+while [ $SECONDS -lt $d ]; do
+  kern_bereit && break
+  kill -0 "$(cat "$LAUF/app.pid")" 2>/dev/null || { echo "starten: die App ist sofort wieder beendet:" >&2; tail -15 "$LAUF/app.log" >&2; abbruch; }
+  if [ -s "$LAUF/kern.pid" ] && [ -z "$(lebt "$LAUF/kern.pid")" ]; then
+    echo "starten: der Kern ist sofort wieder beendet:" >&2; tail -15 "$LAUF/kern.log" >&2; abbruch
+  fi
+  sleep 0.3
+done
+kern_bereit || { echo "starten: der Kern meldete keine Bereitschaft (60 s)" >&2; tail -15 "$LAUF/kern.log" >&2 2>/dev/null; tail -15 "$LAUF/app.log" >&2; abbruch; }
+echo "Kern laeuft (PID $(cat "$LAUF/kern.pid")), Steuerkanal $AWB_CONTROL_SOCKET"
+
 d=$((SECONDS+30))
 while [ $SECONDS -lt $d ]; do
   "$CTL" ping >/dev/null 2>&1 && break

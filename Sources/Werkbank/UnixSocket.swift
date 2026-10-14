@@ -39,10 +39,19 @@ enum UnixSocket {
         }
     }
 
+    /// Setzt FD_CLOEXEC: macOS kennt kein SOCK_CLOEXEC, und ein Kind, das per
+    /// posix_spawn ohne file_actions startet, erbt sonst jeden offenen fd. Ein
+    /// geerbter Mantel-fd liesse das Kind als App sprechen (LOCAL_PEERPID nennt
+    /// dann den Verbinder, also die App).
+    static func nichtVererben(_ fd: Int32) {
+        _ = fcntl(fd, F_SETFD, FD_CLOEXEC)
+    }
+
     static func verbinden(_ pfad: String) throws -> Int32 {
         try pfadPruefen(pfad)
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { throw UnixSocketFehler.anlegen(String(cString: strerror(errno))) }
+        nichtVererben(fd)
         var (addr, laenge) = adresse(pfad)
         let r = withUnsafePointer(to: &addr) {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(fd, $0, laenge) }
@@ -62,6 +71,7 @@ enum UnixSocket {
         unlink(pfad)
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { throw UnixSocketFehler.anlegen(String(cString: strerror(errno))) }
+        nichtVererben(fd)
         var (addr, laenge) = adresse(pfad)
         let r = withUnsafePointer(to: &addr) {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(fd, $0, laenge) }
@@ -97,7 +107,11 @@ enum UnixSocket {
         let quelle = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)
         quelle.setEventHandler {
             let client = accept(fd, nil, nil)
-            if client >= 0 { neu(client) }
+            if client >= 0 {
+                // accept() uebernimmt FD_CLOEXEC nicht vom Lauschsocket.
+                nichtVererben(client)
+                neu(client)
+            }
         }
         quelle.resume()
         return quelle
