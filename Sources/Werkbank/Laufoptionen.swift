@@ -23,7 +23,8 @@ struct Laufoptionen: Sendable {
     /// Pfad des Mantel-Sockets des Kerns (AWB_MANTEL_SOCKET).
     var mantelSocket = ""
     var mantelToken = ""
-    /// Pfad des eigenen Steuerkanals (`awbmac-ctl`), leer = keiner.
+    /// Pfad des eigenen Steuerkanals (`awbmac-ctl`), leer = keiner. Gesetzt nur ausdruecklich
+    /// oder in einer Pruefung (`steuerkanal`).
     var steuerSocket = ""
     /// tmux-Socketname des Kerns (AWB_TMUX_SOCKET), fuer die attach-Variante.
     var tmuxSocket = ""
@@ -38,6 +39,20 @@ struct Laufoptionen: Sendable {
     /// zugeklappten Projekte und die Ablage der Voreinstellungen
     /// (Merker.swift).
     var pruefmodus: Bool { kopflos || ohneFokus }
+
+    /// DER STEUERKANAL IST KEINE VORGABE MEHR (14.10.2026, F1 aus wz-mantelreview). Bisher band
+    /// jede App `<laufdir>/awbmac.sock`, auch die per Dock gestartete des Menschen. Ueber ihn liess
+    /// ein Agent die App selbst senden (Sitzungsstart, Menuepunkte, Rueckfrage bestaetigen), und
+    /// der Kern vertraute der Peer-PID der App. Jetzt gibt es ihn nur noch, wenn ihn der Start
+    /// ausdruecklich verlangt (AWBMAC_CONTROL_SOCKET oder --steuer-socket) oder wenn die App eine
+    /// Pruefung ist. Leer = kein Steuerkanal.
+    static func steuerkanal(_ o: Laufoptionen, laufdir: String) -> String {
+        if !o.steuerSocket.isEmpty { return o.steuerSocket }
+        return o.pruefmodus ? vorgabeSteuerkanal(laufdir: laufdir) : ""
+    }
+
+    /// Wo eine Pruefung ohne ausdruecklichen Pfad lauscht (und eine aeltere Fassung immer lauschte).
+    static func vorgabeSteuerkanal(laufdir: String) -> String { "\(laufdir)/awbmac.sock" }
 
     static func lesen(argv: [String] = CommandLine.arguments,
                       env: [String: String] = ProcessInfo.processInfo.environment) -> Laufoptionen {

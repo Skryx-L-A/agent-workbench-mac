@@ -274,6 +274,9 @@ final class MacSteuerkanal {
             // Ein Punkt der Menueleiste, ausgeloest wie durch sein Kuerzel (⌘1, ⌘2 …):
             // derselbe Weg, den die Tastatur nimmt, samt validateMenuItem.
             guard let mTitel = b.text["menue"], let pTitel = b.text["punkt"] else { return MacSteuerantwort.fehler("menue und punkt fehlen") }
+            // Nur in einer Pruefung (14.10.2026, F1 aus wz-mantelreview): in der App eines Menschen
+            // loeste ein Agent hier jeden Punkt aus, auch „Neue Sitzung im Projekt" als echter Klick.
+            guard optionen.pruefmodus else { return MacSteuerantwort.fehler("hauptmenue gibt es nur im Pruefmodus") }
             guard let oben = NSApp.mainMenu?.items.first(where: { $0.title == mTitel })?.submenu else {
                 return MacSteuerantwort.fehler("kein Menue \(mTitel)")
             }
@@ -628,6 +631,9 @@ final class MacSteuerkanal {
                 }
                 return auskunft()
             case "bestaetigen":
+                // Bestaetigt ein Sheet, das der Mensch geoeffnet hat (Entfernen, Umziehen, Stoppen):
+                // nur in einer Pruefung (14.10.2026, F1 aus wz-mantelreview).
+                guard optionen.pruefmodus else { return MacSteuerantwort.fehler("welten bestaetigen gibt es nur im Pruefmodus") }
                 guard z.rueckfrageId != nil else { return MacSteuerantwort.fehler("keine offene Rueckfrage") }
                 if optionen.kopflos { await z.bestaetigen() }
                 else if !(await rueckfrageKnopf(z, abbrechen: false)) {
@@ -1504,12 +1510,16 @@ final class MacSteuerkanal {
             // nie (er wartet auf einen Menschen).
             let pfad = String(ziel.dropFirst(11))
             guard !pfad.isEmpty else { return MacSteuerantwort.fehler("klick neu-ordner:<pfad> erwartet einen Ordner") }
+            // `echt: true` startet die Sitzung als Mensch: nie aus dem Steuerkanal einer App, die keine
+            // Pruefung ist (14.10.2026, F1 aus wz-mantelreview).
+            guard optionen.pruefmodus else { return MacSteuerantwort.fehler("klick neu-ordner gibt es nur im Pruefmodus") }
             fenster.neueSitzung(ordner: pfad, echt: true)
             return MacSteuerantwort.ok(["neuOrdner": pfad])
         }
         if ziel.hasPrefix("projekt-neu:") {
             // Das Plus am Projektkopf: dieselbe Handlung, der Ordner steht schon fest.
             let dir = String(ziel.dropFirst(12))
+            guard optionen.pruefmodus else { return MacSteuerantwort.fehler("klick projekt-neu gibt es nur im Pruefmodus") }
             guard kern.modell.projekte.contains(where: { $0.dir == dir }) else {
                 return MacSteuerantwort.fehler("Projekt nicht in der Leiste: \(dir)")
             }

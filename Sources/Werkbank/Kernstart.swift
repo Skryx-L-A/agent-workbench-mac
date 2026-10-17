@@ -17,6 +17,25 @@
 // haengt seine Helfer als Kinder darunter, und ein SIGTERM allein an die
 // Wurzel liess sie als Waisen stehen (derselbe Befund wie in
 // `mac/bin/starten`, Funktion `baum_beenden`).
+//
+// DIE INSTALLIERTE APP STARTET IHREN KERN FEST (14.10.2026, Entscheidung der Nutzer
+// zum Menschen-Nachweis M2, shell/wb-mensch). M2 nimmt einen Klick als menschlich,
+// wenn er aus dem Kern kommt, den /Applications/Werkbank.app gestartet hat. Bis
+// heute reichte die App ihre eigene Umgebung an den Kern weiter, und den Kernpfad
+// nahm sie aus AWB_APP_DIR oder der Einstellung `macKernPfad`. Ein
+// `open --env NODE_OPTIONS=--require=<datei> -a Werkbank` brachte so fremden Code
+// in den echten Kern unter der echten App. Im installierten Betrieb gilt deshalb:
+//   - Kernordner nur aus der Info.plist des Buendels (`WBKernPfad`, gesetzt von
+//     mac/bin/installieren VOR dem Signieren), kein AWB_APP_DIR, keine Einstellung;
+//   - Programm ist das Kern-Electron mit abgeschalteten Fuses
+//     (<kern>/kern-electron, app/tools/kern-electron.mjs), nie node_modules;
+//   - Argumente fest (`<kernordner> --headless`), Arbeitsordner der Kernordner;
+//   - Umgebung aus einer Positivliste (`kernUmgebung`), HOME/USER/SHELL aus der
+//     Benutzerdatenbank, PATH fest. Was die Liste enthaelt, ist am 14.10. am
+//     laufenden Kern gemessen: genau die launchd-Umgebung eines Finder-Starts.
+// Dev- und Testbuendel (mac/build/Werkbank.app, jedes Buendel ausserhalb von
+// /Applications) behalten den bisherigen Weg; sie sind fuer M2 ohnehin kein
+// Menschen-Nachweis.
 import Foundation
 
 @MainActor
@@ -31,6 +50,58 @@ final class Kernstart {
         /// Der Steuerkanal des KERNS (awb-ctl), nicht der der App.
         var kernSteuerkanal: String
         var kernPfad: String
+    }
+
+    /// Wo die installierte App liegt -- derselbe Pfad, den wb-mensch (M2_APP_MAC)
+    /// als Elternprozess des Kerns verlangt.
+    static let installiertesBuendel = "/Applications/Werkbank.app"
+
+    /// Laeuft DIESES Buendel als installierte App?
+    static func istInstalliert(buendel: URL = Bundle.main.bundleURL) -> Bool {
+        buendel.resolvingSymlinksInPath().standardizedFileURL.path == installiertesBuendel
+    }
+
+    /// Variablen, die aus der Umgebung der App in den Kern duerfen (installierter
+    /// Betrieb). Nur Sprache, Agent-Socket und die launchd-Kennungen; nichts, was
+    /// Code laden kann (NODE_*, ELECTRON_*, DYLD_*), kein AWB_*/WB_*.
+    static let umgebungDurchlass: Set<String> = [
+        "LANG", "LC_ALL", "LC_CTYPE", "LC_MESSAGES", "LC_COLLATE", "LC_NUMERIC", "LC_TIME", "LC_MONETARY",
+        "SSH_AUTH_SOCK", "__CF_USER_TEXT_ENCODING", "COMMAND_MODE", "XPC_FLAGS", "XPC_SERVICE_NAME",
+        "OSLogRateLimit", "__CFBundleIdentifier",
+    ]
+    /// Der PATH eines Finder-Starts (launchd). Den vollen PATH holt der Kern sich
+    /// selbst ueber die Anmelde-Shell (app/src/main/pfad.ts).
+    static let festerPfad = "/usr/bin:/bin:/usr/sbin:/sbin"
+
+    /**
+     Die Umgebung des Kerns im installierten Betrieb: Durchlassliste aus `geerbt`,
+     dazu HOME, USER, LOGNAME, SHELL aus der Benutzerdatenbank, PATH fest, TMPDIR
+     aus dem System. Die AWB_-Werte des Starts setzt `starten` danach.
+     */
+    static func kernUmgebung(geerbt: [String: String], heim: String, name: String,
+                             shell: String, tmp: String) -> [String: String] {
+        var u = geerbt.filter { umgebungDurchlass.contains($0.key) }
+        u["HOME"] = heim
+        u["USER"] = name
+        u["LOGNAME"] = name
+        u["SHELL"] = shell
+        u["PATH"] = festerPfad
+        u["TMPDIR"] = tmp
+        return u
+    }
+
+    /// Heim, Name und Shell aus der Benutzerdatenbank, nie aus $HOME.
+    static func konto() -> (heim: String, name: String, shell: String) {
+        guard let pw = getpwuid(getuid()) else { return (NSHomeDirectory(), NSUserName(), "/bin/zsh") }
+        return (String(cString: pw.pointee.pw_dir), String(cString: pw.pointee.pw_name),
+                String(cString: pw.pointee.pw_shell))
+    }
+
+    /// Das benutzereigene Temp-Verzeichnis des Systems (confstr), nicht $TMPDIR.
+    static func systemTmp() -> String {
+        var puffer = [CChar](repeating: 0, count: Int(PATH_MAX))
+        let n = confstr(_CS_DARWIN_USER_TEMP_DIR, &puffer, puffer.count)
+        return n > 0 ? String(cString: puffer) : NSTemporaryDirectory()
     }
 
     private var kern: Process?
@@ -60,6 +131,12 @@ final class Kernstart {
      */
     static func kernPfadFinden(env: [String: String] = ProcessInfo.processInfo.environment,
                                buendel: URL = Bundle.main.bundleURL) -> String? {
+        // Installiert: nur der Eintrag in der signierten Info.plist (Kopf).
+        if istInstalliert(buendel: buendel) {
+            guard let p = Bundle(url: buendel)?.infoDictionary?["WBKernPfad"] as? String,
+                  p.hasPrefix("/"), istKern(p) else { return nil }
+            return p
+        }
         var kandidaten: [String] = []
         if let p = env["AWB_APP_DIR"], !p.isEmpty { kandidaten.append(p) }
         if let p = einstellung("macKernPfad", env: env), !p.isEmpty { kandidaten.append(p) }
@@ -88,6 +165,12 @@ final class Kernstart {
         "\(kernPfad)/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron"
     }
 
+    /// Das Kern-Electron mit abgeschalteten Fuses (app/tools/kern-electron.mjs).
+    /// Es laedt den Kern wie node_modules-Electron ueber das Ordner-Argument.
+    static func kernElectronPfad(kernPfad: String) -> String {
+        "\(kernPfad)/kern-electron/Electron.app/Contents/MacOS/Electron"
+    }
+
     /// Ein einzelner Wert aus der Einstellungsdatei, ohne Schema und ohne
     /// Schreibweg: gelesen wird hier nur (geschrieben wird ausschliesslich
     /// ueber `wb-state settings set`, siehe app/src/main/einstellungen.ts).
@@ -107,13 +190,28 @@ final class Kernstart {
      Umgebung schon einen Mantel-Socket mitbringt (dann gehoert der Kern einem
      anderen) -- der Aufrufer nimmt in dem Fall seine bisherigen Optionen.
      */
-    func starten(env: [String: String] = ProcessInfo.processInfo.environment) -> Aufbau? {
-        guard (env["AWB_MANTEL_SOCKET"] ?? "").isEmpty else { return nil }
+    func starten(env geerbt: [String: String] = ProcessInfo.processInfo.environment,
+                 optionen: Laufoptionen? = nil) -> Aufbau? {
+        guard (geerbt["AWB_MANTEL_SOCKET"] ?? "").isEmpty else { return nil }
 
+        // Installiert zaehlt von der geerbten Umgebung nur die Durchlassliste --
+        // auch fuer Laufverzeichnis und Steuerkanal, damit kein AWBMAC_*/AWB_*
+        // aus `open --env` den Start lenkt.
+        let installiert = Self.istInstalliert()
+        let k = Self.konto()
+        let env = installiert
+            ? Self.kernUmgebung(geerbt: geerbt, heim: k.heim, name: k.name, shell: k.shell, tmp: Self.systemTmp())
+            : geerbt
+        // Der eigene Steuerkanal nur ausdruecklich oder in einer Pruefung (Laufoptionen.steuerkanal).
+        // Installiert zaehlt dafuer nur, was die gefilterte Umgebung und die Befehlszeile hergeben:
+        // ein AWBMAC_CONTROL_SOCKET aus `open --env` oeffnet keinen Steuerkanal.
+        let optionen = installiert ? Laufoptionen.lesen(env: env) : (optionen ?? Laufoptionen.lesen(env: env))
         let heim = env["HOME"] ?? NSHomeDirectory()
         let laufdir = env["AWBMAC_LAUFDIR"] ?? "\(heim)/.config/agent-workbench/mac-lauf"
         guard let kernPfad = Self.kernPfadFinden(env: env) else {
-            fehler = "kein Kern gefunden -- 'app/' liegt weder neben dem Buendel noch unter der Einstellung 'macKernPfad'"
+            fehler = installiert
+                ? "kein Kern gefunden -- WBKernPfad fehlt in der Info.plist oder zeigt auf keinen gebauten Kern (mac/bin/installieren)"
+                : "kein Kern gefunden -- 'app/' liegt weder neben dem Buendel noch unter der Einstellung 'macKernPfad'"
             return nil
         }
         do {
@@ -126,7 +224,8 @@ final class Kernstart {
         let a = Aufbau(laufdir: laufdir,
                        mantelSocket: "\(laufdir)/mantel.sock",
                        mantelToken: Self.token(),
-                       steuerSocket: env["AWBMAC_CONTROL_SOCKET"] ?? "\(laufdir)/awbmac.sock",
+                       // Leer, wenn weder ausdruecklich verlangt noch Pruefung (Laufoptionen.steuerkanal).
+                       steuerSocket: Laufoptionen.steuerkanal(optionen, laufdir: laufdir),
                        kernSteuerkanal: Self.kernSteuerkanalWaehlen(env: env, laufdir: laufdir),
                        kernPfad: kernPfad)
 
@@ -139,15 +238,20 @@ final class Kernstart {
             return nil
         }
 
-        let elektron = Self.electronPfad(kernPfad: kernPfad)
+        let elektron = installiert ? Self.kernElectronPfad(kernPfad: kernPfad) : Self.electronPfad(kernPfad: kernPfad)
         guard FileManager.default.isExecutableFile(atPath: elektron) else {
-            fehler = "\(elektron) fehlt oder ist nicht ausfuehrbar -- 'npm install' in \(kernPfad)"
+            fehler = installiert
+                ? "\(elektron) fehlt -- 'npm run kern-electron' in \(kernPfad), dann mac/bin/installieren"
+                : "\(elektron) fehlt oder ist nicht ausfuehrbar -- 'npm install' in \(kernPfad)"
             return nil
         }
 
         let p = Process()
         p.executableURL = URL(fileURLWithPath: elektron)
+        // Beide Wege laden den Kern ueber das Ordner-Argument; wb-mensch verlangt genau
+        // diese Argumente mit dem Kernordner aus seiner festen Liste.
         p.arguments = [kernPfad, "--headless"]
+        p.currentDirectoryURL = URL(fileURLWithPath: kernPfad)
         var u = env
         u["AWB_MANTEL_SOCKET"] = a.mantelSocket
         u["AWB_MANTEL_TOKEN"] = a.mantelToken

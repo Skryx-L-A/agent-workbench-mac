@@ -75,7 +75,10 @@ unset AWB_MANTEL_SOCKET AWB_MANTEL_TOKEN AWB_CONTROL_SOCKET
 export AWBMAC_LAUFDIR="$LAUF"
 export AWB_APP_DIR="$APP_KERN"
 export AWB_CONTROL_SOCKET="$LAUF/awb.sock"
-export AWBMAC_CONTROL_SOCKET="${AWBMAC_CONTROL_SOCKET:-$LAUF/awbmac.sock}"
+# Auch der App-Steuerkanal ist immer der dieses Laufs (14.10.2026, Review-Fund F3):
+# ein geerbter Wert -- die App reicht ihre Umgebung an Kern und tmux-Panes weiter --
+# liesse app_ohne_pid eine fremde Werkbank beenden und `awbmac-ctl quit` an sie gehen.
+export AWBMAC_CONTROL_SOCKET="$LAUF/awbmac.sock"
 export AWBMAC_TERMINAL="$ART"
 CTL="$MAC/bin/awbmac-ctl"
 
@@ -105,7 +108,7 @@ pfad_pruefen() {
 kern_ohne_pid() {
   local p
   for p in $(pgrep -f "lectron $APP_KERN --headless" 2>/dev/null); do
-    if ps -E -o command= -p "$p" 2>/dev/null | tr ' ' '\n' | grep -qx "AWB_MANTEL_SOCKET=$MANTEL_SOCK"; then
+    if ps -ww -E -o command= -p "$p" 2>/dev/null | tr ' ' '\n' | grep -qx "AWB_MANTEL_SOCKET=$MANTEL_SOCK"; then
       echo "$p"
     fi
   done
@@ -157,6 +160,25 @@ kern_hat_app() {
   return 1
 }
 
+# IST <pid> DIE APP, DIE `starten` FUER app.pid GESTARTET HAT? (14.10.2026, Review-Fund F2)
+# Wie bei kern.pid beweist die Datei allein nichts: nach einem Neustart oder
+# Absturz kann ihre Nummer einem fremden Prozess gehoeren, und bis dahin schickte
+# `--stop` ihm `quit` und beendete ihn (gemessen: ein fremdes `sleep`). Verlangt
+# werden das Kommando der App (`…/MacOS/Werkbank`, auch die Test-Attrappe steht
+# dort mit ihrem Pfad) und ein Prozessstart nicht nach dem Schreiben der Datei
+# (starten schreibt app.pid direkt nach dem Start der App).
+app_ist_unsere() {
+  local p="$1" datei="$2" cmd alter mtime
+  cmd="$(ps -ww -o command= -p "$p" 2>/dev/null)" || return 1
+  case " $cmd " in *"/MacOS/Werkbank "*) ;; *) return 1 ;; esac
+  alter="$(prozess_alter "$p")" || return 1
+  mtime="$(stat -f %m "$datei" 2>/dev/null)" || return 1
+  [ $(( $(date +%s) - alter )) -le $(( mtime + 2 )) ]
+}
+
+# Die PID aus app.pid, wenn sie lebt UND unsere App ist; sonst nichts.
+app_lebt() { local p; p="$(lebt "$LAUF/app.pid")" && app_ist_unsere "$p" "$LAUF/app.pid" && echo "$p"; }
+
 # Haelt eine Werkbank-App die Einzelinstanz-Sperre dieses Laufverzeichnisses
 # (Einzelinstanz.swift: flock auf <laufdir>/instanz.lock)? Probeweise sperren und
 # sofort wieder freigeben; fehlt die Datei, haelt sie niemand.
@@ -169,7 +191,7 @@ instanz_belegt() {
 app_ohne_pid() {
   local p
   for p in $(pgrep -f "Werkbank.app/Contents/MacOS/Werkbank" 2>/dev/null); do
-    if ps -E -o command= -p "$p" 2>/dev/null | tr ' ' '\n' | grep -qx "AWBMAC_CONTROL_SOCKET=$AWBMAC_CONTROL_SOCKET"; then
+    if ps -ww -E -o command= -p "$p" 2>/dev/null | tr ' ' '\n' | grep -qx "AWBMAC_CONTROL_SOCKET=$AWBMAC_CONTROL_SOCKET"; then
       echo "$p"
     fi
   done
@@ -227,11 +249,18 @@ kern_beenden() {
 
 stoppen() {
   local p a verschont=0
+  # Signale und `quit` nur an eine App, die app_ist_unsere beweist (F2). Sonst
+  # bleibt der Prozess in Ruhe, und `quit` -- das an $LAUF/awbmac.sock ginge, den
+  # Steuerkanal einer dort lebenden Werkbank -- wird gar nicht erst geschickt.
   if p="$(lebt "$LAUF/app.pid")"; then
-    "$CTL" quit >/dev/null 2>&1
-    local d=$((SECONDS+5)); while [ $SECONDS -lt $d ] && kill -0 "$p" 2>/dev/null; do sleep 0.2; done
-    kill -0 "$p" 2>/dev/null && kill "$p" 2>/dev/null
-    sleep 0.5; kill -0 "$p" 2>/dev/null && kill -9 "$p" 2>/dev/null
+    if ! app_ist_unsere "$p" "$LAUF/app.pid"; then
+      echo "starten --stop: app.pid nennt PID $p, das ist nicht die App dieses Laufs -- nicht beendet" >&2
+    else
+      "$CTL" quit >/dev/null 2>&1
+      local d=$((SECONDS+5)); while [ $SECONDS -lt $d ] && kill -0 "$p" 2>/dev/null; do sleep 0.2; done
+      kill -0 "$p" 2>/dev/null && kill "$p" 2>/dev/null
+      sleep 0.5; kill -0 "$p" 2>/dev/null && kill -9 "$p" 2>/dev/null
+    fi
   fi
   # Erst alle Apps dieses Laufs, dann die Kerne: haengt danach noch ein Kern an
   # einer lebenden Werkbank-App, ist es nicht unsere (kern_hat_app) und er bleibt.
@@ -276,7 +305,7 @@ stoppen() {
 status() {
   local k a
   k="$(lebt "$LAUF/kern.pid")" || k=""
-  a="$(lebt "$LAUF/app.pid")" || a=""
+  a="$(app_lebt)" || a=""
   echo "Laufverzeichnis: $LAUF"
   echo "Kern: ${k:-laeuft nicht}   App: ${a:-laeuft nicht}   Terminal: $ART"
   [ -n "$k" ] && [ -n "$a" ]
@@ -411,7 +440,7 @@ ELECTRON="$APP_KERN/node_modules/electron/dist/Electron.app/Contents/MacOS/Elect
 WERKBANK="$MAC/build/Werkbank.app/Contents/MacOS/Werkbank"
 [ -x "$WERKBANK" ] || { echo "starten: $WERKBANK fehlt -- mac/bin/bauen" >&2; exit 1; }
 
-if p="$(lebt "$LAUF/app.pid")"; then
+if p="$(app_lebt)"; then
   echo "App laeuft bereits (PID $p)"
   if k="$(lebt "$LAUF/kern.pid")"; then echo "Kern laeuft (PID $k), Steuerkanal $AWB_CONTROL_SOCKET"
   else echo "starten: die App laeuft, ihr Kern nicht -- 'starten --stop' und neu starten" >&2; fi

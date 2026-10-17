@@ -2,7 +2,8 @@
 //
 // Start:  Werkbank [--kopflos] [--terminal strom|attach] [--steuer-socket <pfad>]
 // Umgebung: AWB_MANTEL_SOCKET, AWB_MANTEL_TOKEN (der Kern), AWBMAC_CONTROL_SOCKET
-// (der eigene Steuerkanal), AWB_TMUX_SOCKET (fuer die attach-Bauart).
+// (der eigene Steuerkanal; ohne ihn nur in einer Pruefung, Laufoptionen.steuerkanal),
+// AWB_TMUX_SOCKET (fuer die attach-Bauart).
 //
 // AppKit-Hauptprogramm statt `@main App`: nur so laesst sich das Fenster bauen,
 // OHNE es zu zeigen -- die Regel jeder Pruefung (regeln/tests-und-eingriffe.md).
@@ -25,9 +26,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // vorbereitet, also holt die App Laufverzeichnis, Token und Sockets
         // hier. Mit Socket in der Umgebung faellt der Aufruf durch (`nil`) und
         // es bleibt bei den gelesenen Optionen.
-        if let a = kernstart.starten() {
+        if let a = kernstart.starten(optionen: optionen) {
             optionen.mantelSocket = a.mantelSocket
             optionen.mantelToken = a.mantelToken
+            // Leer, wenn der Start keinen Steuerkanal verlangt hat und keine Pruefung ist: die
+            // Dock-App des Menschen lauscht nicht mehr (Laufoptionen.steuerkanal, 14.10.2026).
             optionen.steuerSocket = a.steuerSocket
             optionen.laufdir = a.laufdir
             FileHandle.standardError.write(Data("Kern selbst gestartet: \(a.kernPfad), Steuerkanal \(a.kernSteuerkanal)\n".utf8))
@@ -153,7 +156,9 @@ do {
     case .unbekannt(let grund):
         FileHandle.standardError.write(Data("Werkbank: Einzelinstanz nicht pruefbar (\(grund)); starte trotzdem.\n".utf8))
     case .eigen:
-        if let alte = Einzelinstanz.aeltereAmSteuerkanal(steuer) {
+        // Eine aeltere Fassung lauschte immer am Vorgabepfad, auch wenn diese App selbst keinen
+        // Steuerkanal bindet.
+        if let alte = Einzelinstanz.aeltereAmSteuerkanal(steuer.isEmpty ? Laufoptionen.vorgabeSteuerkanal(laufdir: lauf) : steuer) {
             if !o.pruefmodus, let a = NSRunningApplication(processIdentifier: alte) {
                 NSApplication.shared.yieldActivation(to: a)
                 a.activate(from: NSRunningApplication.current, options: [.activateAllWindows])

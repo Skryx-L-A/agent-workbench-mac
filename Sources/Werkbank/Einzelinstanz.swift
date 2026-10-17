@@ -51,9 +51,9 @@ enum Einzelinstanz {
         return "\(env["HOME"] ?? NSHomeDirectory())/.config/agent-workbench/mac-lauf"
     }
 
-    /// Der Steuerkanal, den diese App binden wird (Kernstart: AWBMAC_CONTROL_SOCKET, sonst im Laufverzeichnis).
+    /// Der Steuerkanal, den diese App binden wird (dieselbe Regel wie Kernstart); leer = keiner.
     static func steuerSocket(_ optionen: Laufoptionen, laufdir: String) -> String {
-        optionen.steuerSocket.isEmpty ? "\(laufdir)/awbmac.sock" : optionen.steuerSocket
+        Laufoptionen.steuerkanal(optionen, laufdir: laufdir)
     }
 
     /**
@@ -96,7 +96,9 @@ enum Einzelinstanz {
         var puffer = [UInt8](repeating: 0, count: 1024)
         let n = pread(fd, &puffer, puffer.count, 0)
         guard n > 0 else { return nil }
-        let zeilen = String(decoding: puffer[0..<n], as: UTF8.self).split(separator: "\n").map(String.init)
+        // Leere Zeilen zaehlen mit: ohne Steuerkanal ist die zweite Zeile leer.
+        let zeilen = String(decoding: puffer[0..<n], as: UTF8.self)
+            .split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
         guard zeilen.count >= 3, let pid = pid_t(zeilen[0]), pid > 0 else { return nil }
         return Inhaber(pid: pid, steuerSocket: zeilen[1], pruefung: zeilen[2] == "pruefung")
     }
@@ -113,7 +115,8 @@ enum Einzelinstanz {
             NSApplication.shared.yieldActivation(to: andere)
             andere.activate(from: NSRunningApplication.current, options: [.activateAllWindows])
         }
-        guard let fd = try? UnixSocket.verbinden(i.steuerSocket) else { return "" }
+        // Ohne Steuerkanal (die Dock-App des Menschen) bleibt nur die Aktivierung oben.
+        guard !i.steuerSocket.isEmpty, let fd = try? UnixSocket.verbinden(i.steuerSocket) else { return "" }
         defer { close(fd) }
         var tv = timeval(tv_sec: 3, tv_usec: 0)
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))

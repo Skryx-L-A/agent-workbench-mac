@@ -152,6 +152,9 @@ final class WeltenZustand {
     var neuesTicket: TicketEntwurf?
     var inspektorOffen = true
     var gelesen = WeltenGelesen()
+    /// Die Marke, die diese Oberflaeche je Gespraech zuletzt als Lesestand an den Kern gegeben hat.
+    /// Auch ein fehlgeschlagener Aufruf zaehlt: eine Marke geht hoechstens einmal je Gespraech raus.
+    var gesendeteMarken: [String: WeltMarke] = [:]
     /// Das Ticket, dessen Rueckgabe gerade im Detail offen steht, und die Bemerkung dazu.
     var rueckgabeOffen: String?
     var rueckgabeText = ""
@@ -416,17 +419,22 @@ final class WeltenZustand {
     /// Ungelesen an einem Agenten der Leiste: sein Einzelchat.
     func ungelesen(_ w: Welt, agent: String) -> Int { ungelesen(w, schluessel: "einzel:\(agent)") }
 
-    /// Was in der Mitte steht, gilt als gesehen. Liegt die juengste Nachricht hinter dem
-    /// Lesestand der Welt, geht die neue Marke ueber den Kern in die Welt (`wb-welt gelesen`).
-    func gesehen(_ w: Welt, echt: Bool = true) {
+    /// Was in der Mitte steht, gilt als gesehen: die lokale Marke setzt jede Anzeige. Der Lesestand
+    /// geht nur auf eine Nutzerhandlung ueber den Kern in die Welt (`wb-welt gelesen`), hoechstens
+    /// einmal je neuer Marke. `echt: nil` ist der Hintergrund (neue Nachricht, Einblenden): kein Aufruf.
+    func gesehen(_ w: Welt, echt: Bool? = true) {
         // Die Uebersicht zeigt aus dem Kanal nur die letzten Zeilen; gelesen ist er damit nicht.
         guard auswahl != Self.uebersicht else { return }
         let k = gespraechSchluessel()
         guard reiter == .chat || k == Self.kanal else { return }
         let liste = nachrichten(w, schluessel: k)
         _ = gelesen.gesehen(liste, welt: w.id, gespraech: k)
-        guard let letzte = liste.max(by: { ($0.zeit, $0.id) < ($1.zeit, $1.id) }) else { return }
+        guard let echt, let letzte = liste.max(by: { ($0.zeit, $0.id) < ($1.zeit, $1.id) }) else { return }
         if let welt = w.gelesenMarken[k], (welt.zeit, welt.id) >= (letzte.zeit, letzte.id) { return }
+        let marke = WeltMarke(zeit: letzte.zeit, id: letzte.id)
+        let schluessel = WeltenGelesen.schluessel(welt: w.id, gespraech: k)
+        guard gesendeteMarken[schluessel] != marke else { return }
+        gesendeteMarken[schluessel] = marke
         let daten: [String: Any] = ["welt": w.pfad, "gespraech": k, "zeit": letzte.zeit, "id": letzte.id]
         Task { _ = await self.ausfuehren("gelesen", daten, echt: echt, still: true) }
     }
@@ -1889,9 +1897,10 @@ struct WeltenMitte: View {
         // meldete eine lange Kopfzeile ihre volle Breite als Minimum, und die
         // Aufteilung schob Leiste und Inspektor aus dem Fenster.
         .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
-        .onChange(of: zustand.gespraechSchluessel()) { zustand.gesehen(welt) }
-        .onChange(of: zustand.nachrichten(welt, schluessel: zustand.gespraechSchluessel()).count) { zustand.gesehen(welt) }
-        .onAppear { zustand.gesehen(welt) }
+        // Hintergrund: die Anzeige setzt nur die lokale Marke; ein Klick sendet den Lesestand.
+        .onChange(of: zustand.gespraechSchluessel()) { zustand.gesehen(welt, echt: nil) }
+        .onChange(of: zustand.nachrichten(welt, schluessel: zustand.gespraechSchluessel()).count) { zustand.gesehen(welt, echt: nil) }
+        .onAppear { zustand.gesehen(welt, echt: nil) }
     }
 
     // --- Kopfzeile ------------------------------------------------------------------
@@ -1928,7 +1937,8 @@ struct WeltenMitte: View {
             }
             Spacer(minLength: 12)
             if let a = agent, !a.direktchats.isEmpty, zustand.reiter == .chat {
-                Picker("Gespräch", selection: $zustand.gespraech) {
+                // Die Wahl im Menue ist ein Klick: sie setzt das Gespraech und sendet den Lesestand (Nutzerhandlung).
+                Picker("Gespräch", selection: Binding(get: { zustand.gespraech }, set: { zustand.gespraech = $0; zustand.gesehen(welt) })) {
                     Text("Mit dir").tag(WeltenZustand.einzel)
                     ForEach(welt.direktchats.filter { a.direktchats.contains($0.id) }) { c in
                         Text("Direkt mit " + c.teilnehmer.filter { $0 != a.id }.map { welt.anzeigename($0) }.joined(separator: ", ")).tag(c.id)

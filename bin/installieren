@@ -25,6 +25,18 @@ for arg in "$@"; do
   esac
 done
 
+# Die Code-Anforderung, die M2 (shell/wb-mensch, M2_ANFORDERUNG_MAC) an App und Kern-Electron
+# stellt; unten wird genau sie mit --strict geprueft. Liegt wb-mensch im Baum, aber das Muster
+# greift nicht (Konstante umbenannt, zwei Eintraege, andere Anfuehrungszeichen), bricht der Lauf
+# ab: ein stiller Rueckfall auf --strict ohne Anforderung liesse eine ad hoc signierte App durch,
+# und M2 waere nach dem Neustart rot (review-fusesfix F3). Im veroeffentlichten Mac-Repo ohne
+# shell/wb-mensch gilt nur --strict.
+ANFORDERUNG="$(sed -n "s/^M2_ANFORDERUNG_MAC=('\([^']*\)')$/\1/p" "$WURZEL/shell/wb-mensch" 2>/dev/null)"
+if [ -f "$WURZEL/shell/wb-mensch" ] && { [ -z "$ANFORDERUNG" ] || [ "$(printf '%s\n' "$ANFORDERUNG" | wc -l)" -ne 1 ]; }; then
+  echo "M2_ANFORDERUNG_MAC in $WURZEL/shell/wb-mensch nicht lesbar (genau ein Eintrag erwartet) -- nichts installiert." >&2
+  exit 1
+fi
+
 [ "$BAUEN" = 1 ] && bash "$MAC/bin/bauen" >/dev/null
 QUELLE="$MAC/build/Werkbank.app"
 [ -d "$QUELLE" ] || { echo "Buendel fehlt: $QUELLE (mac/bin/bauen)" >&2; exit 1; }
@@ -32,20 +44,66 @@ QUELLE="$MAC/build/Werkbank.app"
 # Erst vollstaendig danebenlegen, dann in einem Zug an die Zielstelle bewegen:
 # ein Abbruch mittendrin laesst so kein halbes Programm im Ordner zurueck.
 WERKSTATT="$(mktemp -d)"
-trap 'rm -rf "$WERKSTATT"' EXIT
+KERN_NEU=""
+trap 'rm -rf "$WERKSTATT"; [ -n "$KERN_NEU" ] && rm -rf "$KERN_NEU"' EXIT
 ditto "$QUELLE" "$WERKSTATT/Werkbank.app"
+
+# DER KERN WIRD FEST EINGETRAGEN (14.10.2026, Menschen-Nachweis M2, siehe Kopf von
+# mac/Sources/Werkbank/Kernstart.swift). Die installierte App nimmt ihren Kernordner nur
+# aus `WBKernPfad` in der Info.plist -- eingetragen VOR dem Signieren, also Teil der
+# Signatur -- und startet ihn mit dem Kern-Electron (abgeschaltete Fuses), das hier
+# gebaut und mit derselben Identitaet signiert wird. Zwei Kandidaten wie unten: im
+# bewohnten Baum app/ neben mac/, im veroeffentlichten Mac-Repo das Geschwister-Repo.
+kern_gefunden() { [ -f "$1/package.json" ] && [ -f "$1/dist/main/main.js" ]; }
+KERN=""
+for k in "$WURZEL/app" "$WURZEL/agent-workbench/app"; do
+  kern_gefunden "$k" && { KERN="$(cd "$k" && pwd -P)"; break; }
+done
+# Das Kern-Electron entsteht NEBEN dem bisherigen (kern-electron.neu-<pid>) und ersetzt es
+# erst, wenn beide Signaturen geprueft sind -- ein Abbruch laesst den bisherigen Stand stehen.
+if [ -n "$KERN" ]; then
+  /usr/bin/plutil -replace WBKernPfad -string "$KERN" "$WERKSTATT/Werkbank.app/Contents/Info.plist"
+  KERN_NEU="$KERN/kern-electron.neu-$$"
+  node "$KERN/tools/kern-electron.mjs" --ziel "$KERN_NEU" >/dev/null \
+    || { echo "Kern-Electron nicht gebaut (npm install in $KERN, dann erneut) -- nichts installiert." >&2; exit 1; }
+  bash "$MAC/bin/signieren" "$KERN_NEU/Electron.app"
+else
+  echo "WARNUNG: kein gebauter Kern gefunden -- die installierte App startet keinen Kern." >&2
+fi
 # Das Kopieren macht die Signatur nicht ungueltig, ein Nachsignieren schadet
 # aber nicht und faengt den Fall ab, dass ditto Erweiterungsattribute verliert.
 # Dieselbe stabile Identitaet wie beim Bauen (mac/bin/signieren): nur so bleibt
 # das Designated Requirement gleich und macOS behaelt die Freigaben.
-bash "$MAC/bin/signieren" "$WERKSTATT/Werkbank.app" || true
+bash "$MAC/bin/signieren" "$WERKSTATT/Werkbank.app"
 codesign -dr - "$WERKSTATT/Werkbank.app" 2>/dev/null | grep -q 'designated => cdhash' \
   && echo "WARNUNG: ad hoc signiert -- macOS fragt nach diesem Neubau alle Freigaben erneut (docs/MAC-SIGNATUR.md)." >&2
+
+# PRUEFEN, BEVOR ETWAS ERSETZT WIRD (14.10.2026, Ausrollfund): `signieren` faellt bei
+# einem Fehler auf ad hoc zurueck und endet mit 0, und das Kern-Electron trug damals einen
+# Verweis aus dem Buendel heraus, den `--strict` ablehnt. M2 (shell/wb-mensch) verlangt
+# von App und Kern-Electron die Code-Anforderung M2_ANFORDERUNG_MAC; genau die wird hier
+# mit --strict geprueft. Scheitert eine, wird NICHTS installiert.
+pruefe_signatur() {  # <buendel> <name>
+  local aus
+  if [ -n "$ANFORDERUNG" ]; then
+    aus="$(/usr/bin/codesign --verify --strict --deep -R="$ANFORDERUNG" "$1" 2>&1)"
+  else
+    aus="$(/usr/bin/codesign --verify --strict --deep "$1" 2>&1)"
+  fi || { echo "$2 besteht die Signaturpruefung nicht (${ANFORDERUNG:-ohne Anforderung}): $aus -- nichts installiert." >&2; exit 1; }
+}
+pruefe_signatur "$WERKSTATT/Werkbank.app" "Die App"
+[ -n "$KERN_NEU" ] && pruefe_signatur "$KERN_NEU/Electron.app" "Das Kern-Electron"
+if [ -n "$KERN_NEU" ]; then
+  rm -rf "$KERN/kern-electron"
+  mv "$KERN_NEU" "$KERN/kern-electron"
+  KERN_NEU=""
+fi
 rm -rf "$ZIEL"
 mv "$WERKSTATT/Werkbank.app" "$ZIEL"
 /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$ZIEL"
 
-# Den Kernpfad eintragen, wenn noch keiner dasteht UND wirklich ein Kern
+# Den Kernpfad auch in die Einstellung eintragen (fuer Dev-Buendel; die installierte
+# App liest nur WBKernPfad), wenn noch keiner dasteht UND wirklich ein Kern
 # gefunden wurde. Zwei Kandidaten, wie Kernstart.swift kernPfadFinden: im
 # bewohnten Baum liegt app/ neben mac/ (WURZEL/app, unveraendert); im
 # veroeffentlichten Mac-Repo (ohne mac/-Praefix) liegt dort kein app/ mehr --
@@ -54,11 +112,6 @@ mv "$WERKSTATT/Werkbank.app" "$ZIEL"
 # "WURZEL/app" gesetzt, auch wenn dort gar kein Kern liegt -- ein Wert, der
 # nichts falsch macht (Kernstart.istKern verwirft ihn und sucht weiter), aber
 # eine Sicherheit vorspiegelt, die er nicht hat.
-kern_gefunden() { [ -f "$1/package.json" ] && [ -f "$1/dist/main/main.js" ]; }
-KERN=""
-for k in "$WURZEL/app" "$WURZEL/agent-workbench/app"; do
-  kern_gefunden "$k" && { KERN="$k"; break; }
-done
 if command -v wb-state >/dev/null 2>&1; then
   VORHANDEN="$(wb-state settings get macKernPfad 2>/dev/null || true)"
   case "$VORHANDEN" in
