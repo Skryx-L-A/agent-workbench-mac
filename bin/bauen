@@ -78,7 +78,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>LSMinimumSystemVersion</key><string>26.0</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSSupportsAutomaticGraphicsSwitching</key><true/>
-  <key>NSHumanReadableCopyright</key><string>Copyright Skryx-L-A. PolyForm-Noncommercial-1.0.0</string>
+  <key>NSHumanReadableCopyright</key><string>Copyright Skryx-L-A. BUSL-1.1</string>
   <key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
 </dict>
 </plist>
